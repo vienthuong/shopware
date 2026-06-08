@@ -72,7 +72,7 @@ jobs:
             } else if (ev === 'issues' && context.payload.action === 'labeled') {
               // only collaborators can apply labels → the label itself is the authz.
               if (context.payload.label && context.payload.label.name === LABEL) {
-                run = true;
+                run = true; post = true; // labeling an issue should post the verdict
                 issue = String(context.payload.issue.number);
               }
             } else if (ev === 'issue_comment' && context.payload.action === 'created') {
@@ -80,7 +80,7 @@ jobs:
               const onIssue = !context.payload.issue.pull_request; // issues only, not PRs
               const body = (c.body || '').trim();
               if (onIssue && body.startsWith(CMD) && TRUSTED.includes(c.author_association)) {
-                run = true;
+                run = true; post = true; // /reproduce should post the verdict
                 issue = String(context.payload.issue.number);
               }
             }
