@@ -31,9 +31,16 @@ The repro plan. Picks the cheapest faithful surface and the minimal build.
         "demodata": false,
         "sync_payload_path": "/tmp/repro/fixtures.json"
     },
+    "request": {
+        "method": "POST",
+        "path": "/store-api/checkout/cart",
+        "headers": { "Content-Type": "application/json" },
+        "body": "{}"
+    },
     "assertion": {
         "kind": "http_status | response_field | exception | ui_state",
         "expect": "400",
+        "field": ".errors[0].code",
         "locator": "/store-api/checkout/cart"
     },
     "plugins": [{ "name": "SwagFoo", "activate": true }],
@@ -56,8 +63,15 @@ Rules:
 - `fixtures.sync_payload_path` seeds exactly the entities the bug needs via the admin
   sync API with `demodata: false`. Entity and field names come from the DAL schema,
   never from probing the API.
+- `request` is required for the `http` executor — the cheapest faithful call that
+  triggers the symptom. `assertion.field` is a jq path used only by `response_field`;
+  `assertion.locator` is a human reference to the endpoint/UI element.
 - `assertion` is derived from the linked fix PR's regression test or an existing test
   when one exists (`derived_from`), not discovered by trial-and-error.
+- `assertion.expect` is the **healthy** value (what a fixed shop returns). A leg is
+  `reproduced` when `actual != expect` (symptom present) and `not_reproduced` when
+  `actual == expect` (healthy). This matches running the fix PR's regression test:
+  it fails on the buggy version and passes on the fixed one.
 - `confidence < 0.55`, or no faithful layer found → set `blocked_reason`; Report emits
   `needs_human_review`.
 

@@ -120,7 +120,8 @@ jobs:
             version: $version,
             build_profile: { admin_build: false, storefront_build: false, theme_build: false },
             fixtures: { demodata: false, sync_payload_path: "fixtures.json" },
-            assertion: { kind: "http_status", expect: "400", locator: "/store-api/checkout/cart" },
+            request: { method: "POST", path: "/store-api/checkout/cart", headers: { "Content-Type": "application/json" }, body: "{}" },
+            assertion: { kind: "http_status", expect: "400", field: null, locator: "/store-api/checkout/cart" },
             derived_from: null,
             confidence: 0.82,
             blocked_reason: null
@@ -156,60 +157,65 @@ jobs:
       matrix:
         target: ${{ fromJSON(needs.analyze.outputs.targets) }}
     steps:
+      # repro tooling (this workflow's repo) at root; the shop is installed under ./shop
+      # so setup-shopware's checkout never clobbers analysis.json or the scripts.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: analysis
-      - id: run
+      - id: plan
         env:
           TARGET: ${{ matrix.target }}
-          ISSUE: ${{ needs.gate.outputs.issue }}
         run: |
           set -euo pipefail
-          LAYER=$(jq -r .layer analysis.json)
           EXECUTOR=$(jq -r .executor analysis.json)
-          VERSION=$(jq -r .version analysis.json)
-
-          # ===== STUB: provision Shopware for this target, building only build_profile =====
-          # reported → composer require shopware/core:$VERSION ; trunk → checked-out ref.
-          # http/direct legs build neither storefront nor theme. One-shot, poll until READY.
-          echo "::group::provision (stub) target=$TARGET layer=$LAYER executor=$EXECUTOR version=$VERSION"
-          echo "would provision and seed minimal fixtures (demodata:false)"
-          echo "::endgroup::"
-          # ===== END STUB =====
-
-          # ===== STUB: executor run. http → curl+HAR ; direct → phpunit ; playwright → npx playwright =====
-          # Canned outcome: reported reproduces the bug; trunk does not → verdict fixed_on_trunk.
-          if [ "$TARGET" = "reported" ]; then
-            STATUS="reproduced"; ACTUAL=200; MATCHED=false
+          echo "executor=$EXECUTOR" >> "$GITHUB_OUTPUT"
+          # reported leg pins the exact released tag; trunk leg uses the moving branch.
+          if [ "$TARGET" = "trunk" ]; then
+            echo "version=trunk" >> "$GITHUB_OUTPUT"
           else
-            STATUS="not_reproduced"; ACTUAL=400; MATCHED=true
+            echo "version=v$(jq -r .version analysis.json)" >> "$GITHUB_OUTPUT"
           fi
-          SCRIPT='curl -sS -X POST "$APP_URL/store-api/checkout/cart" -H "sw-access-key: [REDACTED_KEY]" -d "{}"'
+          echo "admin_build=$(jq -r .build_profile.admin_build analysis.json)" >> "$GITHUB_OUTPUT"
+          echo "storefront_build=$(jq -r .build_profile.storefront_build analysis.json)" >> "$GITHUB_OUTPUT"
 
-          jq -n \
-            --argjson issue "$ISSUE" --arg target "$TARGET" --arg version "$VERSION" \
-            --arg executor "$EXECUTOR" --arg status "$STATUS" \
-            --argjson actual "$ACTUAL" --argjson matched "$MATCHED" --arg script "$SCRIPT" '{
-              schema_version: "1",
-              issue: $issue,
-              target: $target,
-              version: $version,
-              executor: $executor,
-              status: $status,
-              assertion: { expect: "400", actual: ($actual | tostring), matched: $matched },
-              duration_s: 1,
-              evidence: {
-                script: $script,
-                script_lang: "sh",
-                reporter_output: ("HTTP " + ($actual | tostring) + " (expected 400)"),
-                http: [{ method: "POST", path: "/store-api/checkout/cart", status: $actual }],
-                artifacts: [],
-                truncated: false
-              },
-              blocked_reason: null
-            }' > result.json
+      # Provision only when an executor needs a live shop (http). Build only the surface.
+      - id: provision
+        if: steps.plan.outputs.executor == 'http'
+        uses: ./.github/actions/repro/provision
+        with:
+          version: ${{ steps.plan.outputs.version }}
+          admin-build: ${{ steps.plan.outputs.admin_build }}
+          storefront-build: ${{ steps.plan.outputs.storefront_build }}
+
+      - name: Run executor
+        env:
+          TARGET: ${{ matrix.target }}
+          EXECUTOR: ${{ steps.plan.outputs.executor }}
+          APP_URL: ${{ steps.provision.outputs.app_url }}
+          SW_ACCESS_KEY: ${{ steps.provision.outputs.access_key }}
+        run: |
+          set -euo pipefail
+          case "$EXECUTOR" in
+            http)
+              ANALYSIS=analysis.json OUT=result.json \
+                bash .github/actions/repro/bin/run-http.sh
+              ;;
+            *)
+              # ===== STUB: direct → phpunit ; playwright → npx playwright =====
+              echo "::warning::executor '$EXECUTOR' not yet implemented; emitting inconclusive"
+              jq -n --argjson issue "$(jq -r .issue analysis.json)" --arg target "$TARGET" \
+                --arg version "$(jq -r .version analysis.json)" --arg executor "$EXECUTOR" '{
+                  schema_version:"1", issue:$issue, target:$target, version:$version, executor:$executor,
+                  status:"inconclusive", assertion:{expect:null,actual:null,matched:null}, duration_s:0,
+                  evidence:{script:"", script_lang:"sh", reporter_output:"executor not implemented",
+                    http:[], artifacts:[], truncated:false},
+                  blocked_reason:("executor "+$executor+" is still a stub") }' > result.json
+              ;;
+          esac
           cat result.json
-          # ===== END STUB =====
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: repro-${{ matrix.target }}
