@@ -112,7 +112,7 @@ jobs:
       - id: mode
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
-          HAS_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          HAS_KEY: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY != '' }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then m=dry_run
@@ -125,7 +125,7 @@ jobs:
       - name: Guard — refuse to fabricate
         if: steps.mode.outputs.mode == 'fail'
         run: |
-          echo "::error::Analyze requires CLAUDE_CODE_OAUTH_TOKEN. Refusing to emit a fabricated plan."
+          echo "::error::Analyze requires QUALITY_INITIATIVE_ANTHROPIC_API_KEY. Refusing to emit a fabricated plan."
           echo "::error::Set the secret, or dispatch with dry_run=true for a clearly-labelled demo."
           exit 1
 
@@ -134,7 +134,7 @@ jobs:
         if: steps.mode.outputs.mode == 'real'
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
           prompt: |
             Run the `reproduce` skill's Analyze phase for issue #${{ needs.gate.outputs.issue }}
             in this shopware/shopware checkout. Read the issue, find the linked fix PR's
