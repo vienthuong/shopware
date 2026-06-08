@@ -1,0 +1,286 @@
+name: Reproduce Issue
+
+# Hand-written orchestrator for the bug-reproduction pipeline.
+#
+#   gate ─▶ analyze ─▶ reproduce (matrix: reported ‖ trunk, parallel) ─▶ report
+#
+# Every job below is a STUB that emits canned JSON conforming to
+# .claude/skills/reproduce/references/SCHEMA.md. The wiring — trigger gating,
+# the dedup/"not on manual rerun" matrix, parallel legs, and the merged comment —
+# runs end-to-end today. Replace each "STUB" block with the real agent
+# (gh-aw / claude-code-action) or deterministic action without touching the topology.
+
+on:
+  issues:
+    types: [labeled] # initial trigger: apply the `ci:reproduce` label
+  issue_comment:
+    types: [created] # initial trigger: comment `/reproduce`
+  workflow_dispatch: # manual rerun (skips the reported-version leg)
+    inputs:
+      issue_number:
+        description: "Issue number to reproduce"
+        required: true
+        type: number
+      post_comment:
+        description: "Post the result as an issue comment (otherwise job summary only)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: reproduce-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write # comment + label, guarded by the gate job
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Decide whether to run, who is allowed, and which issue. One source of truth
+  # for downstream `if:` guards.
+  # --------------------------------------------------------------------------
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      issue: ${{ steps.decide.outputs.issue }}
+      is_manual: ${{ steps.decide.outputs.is_manual }}
+      post: ${{ steps.decide.outputs.post }}
+    steps:
+      - id: decide
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const LABEL = 'ci:reproduce';
+            const CMD = '/reproduce';
+            const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            const ev = context.eventName;
+            let run = false, issue = '', isManual = false, post = false;
+
+            if (ev === 'workflow_dispatch') {
+              // dispatch already requires write access → trusted. This is the manual rerun.
+              run = true;
+              isManual = true;
+              issue = String(context.payload.inputs.issue_number);
+              post = String(context.payload.inputs.post_comment) === 'true';
+            } else if (ev === 'issues' && context.payload.action === 'labeled') {
+              // only collaborators can apply labels → the label itself is the authz.
+              if (context.payload.label && context.payload.label.name === LABEL) {
+                run = true;
+                issue = String(context.payload.issue.number);
+              }
+            } else if (ev === 'issue_comment' && context.payload.action === 'created') {
+              const c = context.payload.comment;
+              const onIssue = !context.payload.issue.pull_request; // issues only, not PRs
+              const body = (c.body || '').trim();
+              if (onIssue && body.startsWith(CMD) && TRUSTED.includes(c.author_association)) {
+                run = true;
+                issue = String(context.payload.issue.number);
+              }
+            }
+
+            core.setOutput('run', String(run));
+            core.setOutput('issue', issue);
+            core.setOutput('is_manual', String(isManual));
+            core.setOutput('post', String(post));
+            core.info(`event=${ev} run=${run} issue=${issue} manual=${isManual} post=${post}`);
+
+  # --------------------------------------------------------------------------
+  # Analyze: emit the repro plan (analysis.json) and the target matrix.
+  # The matrix encodes BOTH dedup (reported == trunk) and "not on manual rerun".
+  # --------------------------------------------------------------------------
+  analyze:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.plan.outputs.targets }}
+    steps:
+      - id: plan
+        env:
+          ISSUE: ${{ needs.gate.outputs.issue }}
+          IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
+        run: |
+          set -euo pipefail
+
+          # ===== STUB: replace with the `reproduce` Analyze agent =====
+          # Real agent reads the issue + linked fix PR's regression test + DAL schema
+          # and emits analysis.json. Here we hard-code a store-api/http plan.
+          REPORTED_VERSION="6.6.10.0"
+          TRUNK_VERSION="trunk"
+
+          jq -n --argjson issue "$ISSUE" --arg version "$REPORTED_VERSION" '{
+            schema_version: "1",
+            issue: $issue,
+            layer: "store-api",
+            executor: "http",
+            version: $version,
+            build_profile: { admin_build: false, storefront_build: false, theme_build: false },
+            fixtures: { demodata: false, sync_payload_path: "fixtures.json" },
+            assertion: { kind: "http_status", expect: "400", locator: "/store-api/checkout/cart" },
+            derived_from: null,
+            confidence: 0.82,
+            blocked_reason: null
+          }' > analysis.json
+          cat analysis.json
+          # ===== END STUB =====
+
+          # dedup + "not on manual rerun": one leg if manual OR reported == trunk.
+          if [ "$IS_MANUAL" = "true" ] || [ "$REPORTED_VERSION" = "$TRUNK_VERSION" ]; then
+            TARGETS='["trunk"]'
+          else
+            TARGETS='["reported","trunk"]'
+          fi
+          echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
+          echo "Computed targets: $TARGETS"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: analysis
+          path: analysis.json
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Reproduce: one parallel leg per target. fail-fast:false so one dead leg
+  # never kills the other. Executor is chosen by analysis.layer (here: http).
+  # --------------------------------------------------------------------------
+  reproduce:
+    needs: [gate, analyze]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.analyze.outputs.targets) }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: analysis
+      - id: run
+        env:
+          TARGET: ${{ matrix.target }}
+          ISSUE: ${{ needs.gate.outputs.issue }}
+        run: |
+          set -euo pipefail
+          LAYER=$(jq -r .layer analysis.json)
+          EXECUTOR=$(jq -r .executor analysis.json)
+          VERSION=$(jq -r .version analysis.json)
+
+          # ===== STUB: provision Shopware for this target, building only build_profile =====
+          # reported → composer require shopware/core:$VERSION ; trunk → checked-out ref.
+          # http/direct legs build neither storefront nor theme. One-shot, poll until READY.
+          echo "::group::provision (stub) target=$TARGET layer=$LAYER executor=$EXECUTOR version=$VERSION"
+          echo "would provision and seed minimal fixtures (demodata:false)"
+          echo "::endgroup::"
+          # ===== END STUB =====
+
+          # ===== STUB: executor run. http → curl+HAR ; direct → phpunit ; playwright → npx playwright =====
+          # Canned outcome: reported reproduces the bug; trunk does not → verdict fixed_on_trunk.
+          if [ "$TARGET" = "reported" ]; then
+            STATUS="reproduced"; ACTUAL=200; MATCHED=false
+          else
+            STATUS="not_reproduced"; ACTUAL=400; MATCHED=true
+          fi
+          SCRIPT='curl -sS -X POST "$APP_URL/store-api/checkout/cart" -H "sw-access-key: [REDACTED_KEY]" -d "{}"'
+
+          jq -n \
+            --argjson issue "$ISSUE" --arg target "$TARGET" --arg version "$VERSION" \
+            --arg executor "$EXECUTOR" --arg status "$STATUS" \
+            --argjson actual "$ACTUAL" --argjson matched "$MATCHED" --arg script "$SCRIPT" '{
+              schema_version: "1",
+              issue: $issue,
+              target: $target,
+              version: $version,
+              executor: $executor,
+              status: $status,
+              assertion: { expect: "400", actual: ($actual | tostring), matched: $matched },
+              duration_s: 1,
+              evidence: {
+                script: $script,
+                script_lang: "sh",
+                reporter_output: ("HTTP " + ($actual | tostring) + " (expected 400)"),
+                http: [{ method: "POST", path: "/store-api/checkout/cart", status: $actual }],
+                artifacts: [],
+                truncated: false
+              },
+              blocked_reason: null
+            }' > result.json
+          cat result.json
+          # ===== END STUB =====
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repro-${{ matrix.target }}
+          path: result.json
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Report: merge legs, apply the verdict map, render a self-contained comment
+  # (verbatim scripts inline; artifacts linked). Runs even if a leg failed.
+  # --------------------------------------------------------------------------
+  report:
+    needs: [gate, analyze, reproduce]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+      - id: merge
+        env:
+          ISSUE: ${{ needs.gate.outputs.issue }}
+        run: |
+          set -euo pipefail
+          REP="artifacts/repro-reported/result.json"
+          TRU="artifacts/repro-trunk/result.json"
+          LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
+
+          rep="null"; tru="null"
+          [ -f "$REP" ] && rep=$(jq -r .status "$REP")
+          [ -f "$TRU" ] && tru=$(jq -r .status "$TRU")
+
+          # verdict map (first match wins); single-leg runs have rep == null.
+          if   [ "$rep" = "reproduced" ]     && [ "$tru" = "reproduced" ];     then VERDICT="live_bug"
+          elif [ "$rep" = "reproduced" ]     && [ "$tru" = "not_reproduced" ]; then VERDICT="fixed_on_trunk"
+          elif [ "$rep" = "not_reproduced" ] && [ "$tru" = "not_reproduced" ]; then VERDICT="not_reproducible"
+          elif [ "$rep" = "blocked" ] || [ "$tru" = "blocked" ];               then VERDICT="blocked"
+          elif [ "$rep" = "null" ] && [ "$tru" = "reproduced" ];               then VERDICT="live_bug"
+          elif [ "$rep" = "null" ] && [ "$tru" = "not_reproduced" ];           then VERDICT="not_reproducible"
+          else VERDICT="needs_human_review"
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+          # render comment.md (durable: verbatim scripts inline, artifacts are links elsewhere)
+          {
+            echo "## Reproduction — Issue #${ISSUE}: \`${VERDICT}\`"
+            echo
+            echo "Layer \`${LAYER}\` · reported: \`${rep}\` · trunk: \`${tru}\`"
+            for t in reported trunk; do
+              f="artifacts/repro-${t}/result.json"
+              [ -f "$f" ] || continue
+              st=$(jq -r .status "$f"); ex=$(jq -r .assertion.expect "$f"); ac=$(jq -r .assertion.actual "$f")
+              echo
+              echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
+              echo
+              echo '```sh'
+              jq -r .evidence.script "$f"
+              echo '```'
+              echo "Reporter: \`$(jq -r .evidence.reporter_output "$f")\`"
+            done
+          } > comment.md
+          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Post comment
+        if: needs.gate.outputs.post == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number('${{ needs.gate.outputs.issue }}'),
+              body: fs.readFileSync('comment.md', 'utf8'),
+            });

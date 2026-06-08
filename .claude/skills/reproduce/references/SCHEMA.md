@@ -1,0 +1,143 @@
+# Output Shape
+
+Three contracts, one per pipeline seam. Emit JSON only in wrapper-fed / CI mode —
+no markdown fence, no prose.
+
+- `analysis.json` — produced by **Analyze**, consumed by **Reproduce**. The repro plan.
+- `result.json` — produced by each **Reproduce** leg (one per target).
+- `repro-output.json` — produced by **Report**, merges the legs, renders the GitHub comment.
+
+Every phase may be a stub first (emit a hand-written object that satisfies the
+contract) and an agent later. Downstream phases bind to the shape, not the source.
+
+## Analysis (`analysis.json`)
+
+The repro plan. Picks the cheapest faithful surface and the minimal build.
+
+```json
+{
+    "schema_version": "1",
+    "issue": 16638,
+    "layer": "service | store-api | admin-api | storefront-ui | admin-ui",
+    "executor": "direct | http | playwright",
+    "version": "6.6.10.0",
+    "targets": ["reported", "trunk"],
+    "build_profile": {
+        "admin_build": false,
+        "storefront_build": false,
+        "theme_build": false
+    },
+    "fixtures": {
+        "demodata": false,
+        "sync_payload_path": "/tmp/repro/fixtures.json"
+    },
+    "assertion": {
+        "kind": "http_status | response_field | exception | ui_state",
+        "expect": "400",
+        "locator": "/store-api/checkout/cart"
+    },
+    "plugins": [{ "name": "SwagFoo", "activate": true }],
+    "derived_from": "PR#16640 tests/.../MultiWarehouseTest.php",
+    "confidence": 0.82,
+    "blocked_reason": null
+}
+```
+
+Rules:
+
+- `layer` is the cheapest surface that genuinely exercises the symptom. Order:
+  `service` < `store-api` / `admin-api` < `storefront-ui` / `admin-ui`. Escalate
+  only when a cheaper layer cannot fire the symptom; record why in the agent's reasoning.
+- `executor` follows `layer`: `service` → `direct`, `*-api` → `http`, `*-ui` → `playwright`.
+- `build_profile` enables only the surface `layer` needs. `storefront_build` /
+  `theme_build` are `true` only for `storefront-ui`. A `direct` or `http` plan builds neither.
+- `targets` is `["reported", "trunk"]`. Collapse to `["trunk"]` when the reported
+  version equals trunk, or on manual rerun — the reported-version result is cached.
+- `fixtures.sync_payload_path` seeds exactly the entities the bug needs via the admin
+  sync API with `demodata: false`. Entity and field names come from the DAL schema,
+  never from probing the API.
+- `assertion` is derived from the linked fix PR's regression test or an existing test
+  when one exists (`derived_from`), not discovered by trial-and-error.
+- `confidence < 0.55`, or no faithful layer found → set `blocked_reason`; Report emits
+  `needs_human_review`.
+
+## Repro Result (`result.json`)
+
+One object per Reproduce leg.
+
+```json
+{
+    "schema_version": "1",
+    "issue": 16638,
+    "target": "reported | trunk",
+    "version": "6.6.10.0",
+    "executor": "playwright",
+    "status": "reproduced | not_reproduced | blocked | inconclusive",
+    "assertion": { "expect": "400", "actual": "200", "matched": false },
+    "duration_s": 47,
+    "evidence": {
+        "script": "import { test, expect } from '@playwright/test';\n…",
+        "script_lang": "ts | php | sh",
+        "reporter_output": "✘ checkout › cart returns 400\n  Expected 400, received 200",
+        "http": [{ "method": "POST", "path": "/store-api/checkout/cart", "status": 200 }],
+        "artifacts": [
+            { "kind": "trace | video | screenshot | html_report | har", "name": "trace.zip", "run_artifact": "repro-reported" }
+        ],
+        "truncated": false
+    },
+    "blocked_reason": null
+}
+```
+
+Rules:
+
+- `status` is one-shot and bounded. `not_reproduced` only after a single re-check.
+  `blocked` when the env is dead — plugin install or theme build failed after one
+  rebuild; never grind. `inconclusive` = env READY but the fixture could not be triggered.
+- `evidence.script` is the full generated repro source, verbatim, always inline — the
+  report stays self-contained after artifacts expire.
+- `evidence.reporter_output` is the trimmed console reporter (Playwright `list`, PHPUnit,
+  or the curl exchange). `evidence.http` carries the request/response (HAR) for
+  `http` and `playwright` legs.
+- `evidence.artifacts` are run-artifact references only and may expire. `screenshot`,
+  `video`, and `trace` are emitted only by the `playwright` executor — never force a
+  browser screenshot on a `direct` or `http` leg.
+- The verdict in `status` / `assertion` never depends on fetching an artifact.
+- Set `truncated: true` and trim `reporter_output` first when the rendered comment would
+  exceed GitHub's 65 535-character limit; trim `script` last.
+- Redact secrets, tokens, and instance hostnames to `[REDACTED_KEY]`, `[REDACTED_ID]`,
+  `[REDACTED_URL]` before emit.
+
+## Merged Report (`repro-output.json`)
+
+```json
+{
+    "schema_version": "1",
+    "issue": 16638,
+    "verdict": "live_bug | fixed_on_trunk | not_reproducible | blocked | needs_human_review",
+    "layer": "store-api",
+    "results": { "reported": { "...": "result.json" }, "trunk": { "...": "result.json" } },
+    "summary": "1-3 sentences naming the symptom and the surface it fired on.",
+    "label": "ci:reproduced | ci:not-reproduced | ci:fixed-on-trunk | ci:repro-blocked",
+    "requires_human": false
+}
+```
+
+Verdict map (first match wins):
+
+| reported        | trunk            | verdict              |
+| --------------- | ---------------- | -------------------- |
+| `reproduced`    | `reproduced`     | `live_bug`           |
+| `reproduced`    | `not_reproduced` | `fixed_on_trunk`     |
+| `not_reproduced`| `not_reproduced` | `not_reproducible`   |
+| any `blocked`   | —                | `blocked`            |
+| any `inconclusive` or low confidence | — | `needs_human_review` |
+
+Rules:
+
+- When `targets` collapsed to one leg, the missing leg is `null`. A single-leg run can
+  only yield `live_bug` (trunk reproduced), `not_reproducible`, or `needs_human_review`.
+- `label` and `summary` are the only fields Report turns into write-actions. The comment
+  body embeds each leg's `evidence.script` and trimmed `reporter_output`, and links
+  `evidence.artifacts`.
+- `requires_human` is `true` for `blocked` and `needs_human_review`.
