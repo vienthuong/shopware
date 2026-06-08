@@ -102,6 +102,7 @@ jobs:
     timeout-minutes: 15 # the agent reads the issue + fix-PR test + schema
     permissions:
       contents: read # checkout
+      issues: read # agent reads the issue via gh
       id-token: write # claude-code-action fetches a GitHub token via OIDC
     outputs:
       targets: ${{ steps.matrix.outputs.targets }}
@@ -138,6 +139,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
+          # Use the default token so the action skips the Claude GitHub App token
+          # exchange (the App is installed on shopware/shopware, but not everywhere).
+          github_token: ${{ github.token }}
           prompt: |
             Run the `reproduce` skill's Analyze phase for issue #${{ needs.gate.outputs.issue }}
             in this shopware/shopware checkout. Read the issue, find the linked fix PR's
