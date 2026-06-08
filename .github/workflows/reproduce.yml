@@ -4,11 +4,10 @@ name: Reproduce Issue
 #
 #   gate ─▶ analyze ─▶ reproduce (matrix: reported ‖ trunk, parallel) ─▶ report
 #
-# Every job below is a STUB that emits canned JSON conforming to
-# .claude/skills/reproduce/references/SCHEMA.md. The wiring — trigger gating,
-# the dedup/"not on manual rerun" matrix, parallel legs, and the merged comment —
-# runs end-to-end today. Replace each "STUB" block with the real agent
-# (gh-aw / claude-code-action) or deterministic action without touching the topology.
+# Status: analyze = real claude-code-action agent (explicit dry_run demo / hard-fail
+# if no key); reproduce(http) = real provision + executor; reproduce(direct|playwright)
+# = stubs (emit inconclusive). All JSON conforms to
+# .claude/skills/reproduce/references/SCHEMA.md.
 
 on:
   issues:
@@ -23,6 +22,11 @@ on:
         type: number
       post_comment:
         description: "Post the result as an issue comment (otherwise job summary only)"
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "DEMO: skip the Analyze agent and emit a canned plan (smoke-test the wiring without an API key)"
         required: false
         default: false
         type: boolean
@@ -95,42 +99,79 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15 # the agent reads the issue + fix-PR test + schema
     outputs:
-      targets: ${{ steps.plan.outputs.targets }}
+      targets: ${{ steps.matrix.outputs.targets }}
     steps:
-      - id: plan
+      # Codebase available so the agent can read the DAL schema + the fix PR's test.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Decide the mode ONCE. Never silently fabricate: missing key + not dry-run = fail.
+      - id: mode
         env:
-          ISSUE: ${{ needs.gate.outputs.issue }}
-          IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          HAS_KEY: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
         run: |
           set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then m=dry_run
+          elif [ "$HAS_KEY" = "true" ]; then m=real
+          else m=fail; fi
+          echo "mode=$m" >> "$GITHUB_OUTPUT"
+          echo "analyze mode: $m"
 
-          # ===== STUB: replace with the `reproduce` Analyze agent =====
-          # Real agent reads the issue + linked fix PR's regression test + DAL schema
-          # and emits analysis.json. Here we hard-code a store-api/http plan.
-          REPORTED_VERSION="6.6.10.0"
-          TRUNK_VERSION="trunk"
+      # Production safety: no key and not an explicit demo → fail loud, BEFORE provisioning.
+      - name: Guard — refuse to fabricate
+        if: steps.mode.outputs.mode == 'fail'
+        run: |
+          echo "::error::Analyze requires CLAUDE_CODE_OAUTH_TOKEN. Refusing to emit a fabricated plan."
+          echo "::error::Set the secret, or dispatch with dry_run=true for a clearly-labelled demo."
+          exit 1
 
-          jq -n --argjson issue "$ISSUE" --arg version "$REPORTED_VERSION" '{
-            schema_version: "1",
-            issue: $issue,
-            layer: "store-api",
-            executor: "http",
-            version: $version,
+      # Real Analyze agent. Emits analysis.json per references/SCHEMA.md.
+      - name: Analyze (agent)
+        if: steps.mode.outputs.mode == 'real'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Run the `reproduce` skill's Analyze phase for issue #${{ needs.gate.outputs.issue }}
+            in this shopware/shopware checkout. Read the issue, find the linked fix PR's
+            regression test and the relevant DAL schema, derive the cheapest faithful plan,
+            and write ONLY the analysis.json object (per
+            .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
+            workspace root. No prose, no markdown fence. Do not comment or label.
+          claude_args: '--allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
+
+      # DEMO only: canned plan, reached solely via dry_run=true.
+      - name: Analyze (dry-run demo)
+        if: steps.mode.outputs.mode == 'dry_run'
+        env:
+          ISSUE: ${{ needs.gate.outputs.issue }}
+        run: |
+          set -euo pipefail
+          echo "::warning::DEMO dry-run — emitting a canned plan, NOT a real analysis."
+          jq -n --argjson issue "$ISSUE" '{
+            schema_version: "1", issue: $issue, layer: "store-api", executor: "http",
+            version: "6.6.10.0",
             build_profile: { admin_build: false, storefront_build: false, theme_build: false },
             fixtures: { demodata: false, sync_payload_path: "fixtures.json" },
             request: { method: "POST", path: "/store-api/checkout/cart", headers: { "Content-Type": "application/json" }, body: "{}" },
             assertion: { kind: "http_status", expect: "400", field: null, locator: "/store-api/checkout/cart" },
-            derived_from: null,
-            confidence: 0.82,
-            blocked_reason: null
+            derived_from: "DEMO (dry-run)", confidence: 0.0, blocked_reason: null
           }' > analysis.json
-          cat analysis.json
-          # ===== END STUB =====
 
-          # dedup + "not on manual rerun": one leg if manual OR reported == trunk.
-          if [ "$IS_MANUAL" = "true" ] || [ "$REPORTED_VERSION" = "$TRUNK_VERSION" ]; then
+      # Compute the target matrix from the produced plan (dedup + not-on-manual-rerun).
+      - id: matrix
+        env:
+          IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
+        run: |
+          set -euo pipefail
+          [ -f analysis.json ] || { echo "::error::no analysis.json produced"; exit 1; }
+          cat analysis.json
+          VERSION=$(jq -r '.version' analysis.json)
+          if [ "$IS_MANUAL" = "true" ] || [ "$VERSION" = "trunk" ]; then
             TARGETS='["trunk"]'
           else
             TARGETS='["reported","trunk"]'
