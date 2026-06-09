@@ -35,6 +35,11 @@ concurrency:
   group: reproduce-${{ github.event.issue.number || inputs.issue_number }}
   cancel-in-progress: false
 
+env:
+  # shopware/setup-shopware pulls node20 sub-actions (runs-on/action, setup-php, cache,
+  # checkout@v4); force them onto node24 to silence the deprecation warning we don't own.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 permissions:
   contents: read
   issues: write # comment + label, guarded by the gate job
@@ -178,7 +183,7 @@ jobs:
           # thrashing on denied tools (denials burn turns -> $). Matches triage's pins.
           claude_args: >-
             --model claude-sonnet-4-6 --max-turns 40
-            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*)"
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(gh api:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(wc:*)"
 
       # DEMO only: canned plan, reached solely via dry_run=true.
       - name: Analyze (dry-run demo)
@@ -509,7 +514,7 @@ jobs:
           {
             echo "## Reproduction — Issue #${ISSUE}: \`${VERDICT}\`"
             echo
-            echo "Layer \`${LAYER}\` · reported: \`${REP}\` · trunk: \`${TRU}\`"
+            echo "Layer \`${LAYER}\` · reported: \`${REP}\` · trunk: \`${TRU}\` · [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
             echo
             # Scenario (human-readable intent) before the per-leg scripts.
             if jq -e '.scenario | arrays and length > 0' artifacts/analysis/analysis.json >/dev/null 2>&1; then

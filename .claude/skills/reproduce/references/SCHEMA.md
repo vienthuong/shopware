@@ -21,7 +21,6 @@ The repro plan. Picks the cheapest faithful surface and the minimal build.
     "layer": "service | store-api | admin-api | storefront-ui | admin-ui",
     "executor": "direct | http | playwright",
     "version": "6.6.10.0",
-    "targets": ["reported", "trunk"],
     "build_profile": {
         "admin_build": false,
         "storefront_build": false,
@@ -64,8 +63,10 @@ Rules:
 - `executor` follows `layer`: `service` → `direct`, `*-api` → `http`, `*-ui` → `playwright`.
 - `build_profile` enables only the surface `layer` needs. `storefront_build` /
   `theme_build` are `true` only for `storefront-ui`. A `direct` or `http` plan builds neither.
-- `targets` is `["reported", "trunk"]`. Collapse to `["trunk"]` when the reported
-  version equals trunk, or on manual rerun — the reported-version result is cached.
+- The agent does NOT choose which versions to run — the **workflow** computes that from
+  `version`: two legs (reported = `version`, trunk) normally; **one leg (trunk only) when
+  `version == trunk` or on a manual `workflow_dispatch` rerun** ("not on manual rerun").
+  So a dispatch always runs trunk alone; use the **label/comment** trigger for both legs.
 - `fixtures.sync_payload_path` seeds exactly the entities the bug needs via the admin
   sync API with `demodata: false`. Entity and field names come from the DAL schema,
   never from probing the API.
