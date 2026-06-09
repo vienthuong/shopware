@@ -278,60 +278,163 @@ jobs:
           retention-days: 7
 
   # --------------------------------------------------------------------------
-  # Report: merge legs, apply the verdict map, render a self-contained comment
-  # (verbatim scripts inline; artifacts linked). Runs even if a leg failed.
+  # Verdict: deterministic decision from leg statuses + Analyze confidence. No agent.
   # --------------------------------------------------------------------------
-  report:
+  verdict:
     needs: [gate, analyze, reproduce]
     if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      has_results: ${{ steps.v.outputs.has_results }}
+      verdict: ${{ steps.v.outputs.verdict }}
+      reported: ${{ steps.v.outputs.reported }}
+      trunk: ${{ steps.v.outputs.trunk }}
+      fix_candidate: ${{ steps.v.outputs.fix_candidate }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+      - id: v
+        run: |
+          set -euo pipefail
+          REP="artifacts/repro-reported/result.json"
+          TRU="artifacts/repro-trunk/result.json"
+          # No leg produced a result → no verdict, no comment downstream.
+          if [ ! -f "$REP" ] && [ ! -f "$TRU" ]; then
+            echo "has_results=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No reproduce leg produced a result (aborted/cancelled/failed)."
+            exit 0
+          fi
+          echo "has_results=true" >> "$GITHUB_OUTPUT"
+          rep="null"; tru="null"
+          [ -f "$REP" ] && rep=$(jq -r .status "$REP")
+          [ -f "$TRU" ] && tru=$(jq -r .status "$TRU")
+          echo "reported=$rep" >> "$GITHUB_OUTPUT"
+          echo "trunk=$tru" >> "$GITHUB_OUTPUT"
+
+          A=artifacts/analysis/analysis.json
+          CONF=$(jq -r '.confidence // 1' "$A" 2>/dev/null || echo 1)
+          BLOCKED=$(jq -r '.blocked_reason // ""' "$A" 2>/dev/null || echo "")
+          DERIVED=$(jq -r '.derived_from // ""' "$A" 2>/dev/null || echo "")
+          # Analyze itself flagged a weak/unformable plan → don't trust any verdict.
+          unsure=false
+          [ -n "$BLOCKED" ] && unsure=true
+          awk "BEGIN{exit !($CONF < 0.55)}" && unsure=true
+
+          # Precedence: infra → unreliable-plan → indeterminate leg → core combos.
+          if   [ "$rep" = "blocked" ] || [ "$tru" = "blocked" ];               then V="blocked"
+          elif [ "$unsure" = "true" ];                                         then V="needs_human_review"
+          elif [ "$rep" = "inconclusive" ] || [ "$tru" = "inconclusive" ];     then V="needs_human_review"
+          elif [ "$rep" = "reproduced" ]     && [ "$tru" = "reproduced" ];     then V="live_bug"
+          elif [ "$rep" = "reproduced" ]     && [ "$tru" = "not_reproduced" ]; then V="fixed_on_trunk"
+          elif [ "$rep" = "not_reproduced" ] && [ "$tru" = "reproduced" ];     then V="regression"
+          elif [ "$rep" = "not_reproduced" ] && [ "$tru" = "not_reproduced" ]; then V="not_reproducible"
+          elif [ "$rep" = "null" ]           && [ "$tru" = "reproduced" ];     then V="live_bug"
+          elif [ "$rep" = "null" ]           && [ "$tru" = "not_reproduced" ]; then V="not_reproducible"
+          else V="needs_human_review"
+          fi
+          echo "verdict=$V" >> "$GITHUB_OUTPUT"
+          # fixed_on_trunk: the fixing PR/commit is often already known (Analyze's derived_from).
+          FIX=""; [ "$V" = "fixed_on_trunk" ] && FIX="$DERIVED"
+          echo "fix_candidate=$FIX" >> "$GITHUB_OUTPUT"
+          echo "verdict=$V reported=$rep trunk=$tru unsure=$unsure fix='$FIX'"
+
+  # --------------------------------------------------------------------------
+  # Attribute (AGENT, gated): on a diverging verdict, name the commit that fixed
+  # or introduced the symptom. Only runs for regression, or fixed_on_trunk with no
+  # known fix PR. Enrichment only — skips (does not fail) when no API key.
+  # --------------------------------------------------------------------------
+  attribute:
+    needs: [gate, analyze, reproduce, verdict]
+    if: >
+      always() && needs.gate.outputs.run == 'true' && needs.verdict.outputs.has_results == 'true' &&
+      ( needs.verdict.outputs.verdict == 'regression' ||
+        ( needs.verdict.outputs.verdict == 'fixed_on_trunk' && needs.verdict.outputs.fix_candidate == '' ) )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # full history for the git log range
+      issues: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # need v<reported>..trunk history + tags
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: analysis
+      - id: mode
+        env:
+          HAS_KEY: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY != '' }}
+        run: echo "real=$HAS_KEY" >> "$GITHUB_OUTPUT"
+      - name: Attribute (agent)
+        if: steps.mode.outputs.real == 'true'
+        continue-on-error: true # enrichment only — a failed attribution must not red the run
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(rg:*),Write"'
+          prompt: |
+            The reproduce pipeline returned verdict "${{ needs.verdict.outputs.verdict }}" for issue
+            #${{ needs.gate.outputs.issue }}. Read analysis.json for the reported version and the
+            implicated code paths/symptom. Inspect `git log v<reported-version>..trunk` restricted to
+            those paths and find the single commit that most likely
+            ${{ needs.verdict.outputs.verdict == 'regression' && 'INTRODUCED' || 'FIXED' }} the symptom
+            (the one whose diff touches the asserted behaviour). Write ONLY this JSON to
+            attribution.json — no prose, no fence:
+            {"schema_version":"1","kind":"${{ needs.verdict.outputs.verdict == 'regression' && 'regression' || 'fix' }}","likely_commit":"<sha>","pr":"<#-or-null>","reasoning":"<1-2 sentences>","confidence":0.0}
+      - name: Skipped (no key)
+        if: steps.mode.outputs.real != 'true'
+        run: echo "::warning::No API key — skipping commit attribution (enrichment only)."
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: hashFiles('attribution.json') != ''
+        with:
+          name: attribution
+          path: attribution.json
+          retention-days: 7
+
+  # --------------------------------------------------------------------------
+  # Report: render a self-contained comment from the verdict + per-leg evidence
+  # + (optional) attribution. No agent. Posts only when a result exists.
+  # --------------------------------------------------------------------------
+  report:
+    needs: [gate, analyze, reproduce, verdict, attribute]
+    if: always() && needs.gate.outputs.run == 'true' && needs.verdict.outputs.has_results == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
-      - id: merge
+      - id: render
         env:
           ISSUE: ${{ needs.gate.outputs.issue }}
+          VERDICT: ${{ needs.verdict.outputs.verdict }}
+          REP: ${{ needs.verdict.outputs.reported }}
+          TRU: ${{ needs.verdict.outputs.trunk }}
+          FIX: ${{ needs.verdict.outputs.fix_candidate }}
         run: |
           set -euo pipefail
-          REP="artifacts/repro-reported/result.json"
-          TRU="artifacts/repro-trunk/result.json"
-
-          # No leg produced a report (reproduce aborted/cancelled/failed) → do NOT
-          # post a content-free verdict. Skip the comment; note it in the summary.
-          if [ ! -f "$REP" ] && [ ! -f "$TRU" ]; then
-            echo "has_results=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::No reproduce leg produced a result — skipping verdict comment."
-            {
-              echo "## Reproduction — Issue #${ISSUE}: _no result_"
-              echo "No leg produced a \`result.json\` (reproduce was skipped, cancelled, or failed). No comment posted."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "has_results=true" >> "$GITHUB_OUTPUT"
-
           LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
-          rep="null"; tru="null"
-          [ -f "$REP" ] && rep=$(jq -r .status "$REP")
-          [ -f "$TRU" ] && tru=$(jq -r .status "$TRU")
-
-          # verdict map (first match wins); single-leg runs have rep == null.
-          if   [ "$rep" = "reproduced" ]     && [ "$tru" = "reproduced" ];     then VERDICT="live_bug"
-          elif [ "$rep" = "reproduced" ]     && [ "$tru" = "not_reproduced" ]; then VERDICT="fixed_on_trunk"
-          elif [ "$rep" = "not_reproduced" ] && [ "$tru" = "not_reproduced" ]; then VERDICT="not_reproducible"
-          elif [ "$rep" = "blocked" ] || [ "$tru" = "blocked" ];               then VERDICT="blocked"
-          elif [ "$rep" = "null" ] && [ "$tru" = "reproduced" ];               then VERDICT="live_bug"
-          elif [ "$rep" = "null" ] && [ "$tru" = "not_reproduced" ];           then VERDICT="not_reproducible"
-          else VERDICT="needs_human_review"
-          fi
-          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
-
-          # render comment.md (durable: verbatim scripts inline, artifacts are links elsewhere)
+          ATTR="artifacts/attribution/attribution.json"
           {
             echo "## Reproduction — Issue #${ISSUE}: \`${VERDICT}\`"
             echo
-            echo "Layer \`${LAYER}\` · reported: \`${rep}\` · trunk: \`${tru}\`"
+            echo "Layer \`${LAYER}\` · reported: \`${REP}\` · trunk: \`${TRU}\`"
+            echo
+            if [ "$VERDICT" = "fixed_on_trunk" ] && [ -n "$FIX" ]; then
+              echo "**Likely fix (backport candidate):** ${FIX}"
+            fi
+            if [ "$VERDICT" = "regression" ]; then
+              echo "> ⚠️ **Regression**: not reproduced on the reported version but reproduced on trunk. Confirm the reported leg actually exercised the symptom (a missing fixture can cause a false negative)."
+            fi
+            if [ -f "$ATTR" ]; then
+              KIND=$(jq -r .kind "$ATTR"); CMT=$(jq -r .likely_commit "$ATTR"); RSN=$(jq -r .reasoning "$ATTR")
+              echo "**Likely ${KIND} commit:** \`${CMT}\` — ${RSN}"
+            fi
             for t in reported trunk; do
               f="artifacts/repro-${t}/result.json"
               [ -f "$f" ] || continue
@@ -347,7 +450,7 @@ jobs:
           } > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
       - name: Post comment
-        if: needs.gate.outputs.post == 'true' && steps.merge.outputs.has_results == 'true'
+        if: needs.gate.outputs.post == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |

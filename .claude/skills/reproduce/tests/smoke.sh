@@ -21,12 +21,16 @@ check "manual rerun -> one leg"   '["trunk"]'            "$(targets true  6.6.10
 check "reported==trunk -> one leg" '["trunk"]'           "$(targets false trunk    trunk)"
 
 # --- verdict map (first match wins); single-leg runs have reported == null ---
-verdict () { # verdict <reported_status> <trunk_status>
-  local rep="$1" tru="$2"
-  if   [ "$rep" = reproduced ]     && [ "$tru" = reproduced ];     then echo live_bug
+# unsure = analyze flagged a weak/blocked plan (blocked_reason or confidence < 0.55).
+verdict () { # verdict <reported_status> <trunk_status> [unsure]
+  local rep="$1" tru="$2" unsure="${3:-false}"
+  if   [ "$rep" = blocked ] || [ "$tru" = blocked ];               then echo blocked
+  elif [ "$unsure" = true ];                                       then echo needs_human_review
+  elif [ "$rep" = inconclusive ] || [ "$tru" = inconclusive ];     then echo needs_human_review
+  elif [ "$rep" = reproduced ]     && [ "$tru" = reproduced ];     then echo live_bug
   elif [ "$rep" = reproduced ]     && [ "$tru" = not_reproduced ]; then echo fixed_on_trunk
+  elif [ "$rep" = not_reproduced ] && [ "$tru" = reproduced ];     then echo regression
   elif [ "$rep" = not_reproduced ] && [ "$tru" = not_reproduced ]; then echo not_reproducible
-  elif [ "$rep" = blocked ] || [ "$tru" = blocked ];               then echo blocked
   elif [ "$rep" = null ] && [ "$tru" = reproduced ];               then echo live_bug
   elif [ "$rep" = null ] && [ "$tru" = not_reproduced ];           then echo not_reproducible
   else echo needs_human_review; fi
@@ -34,10 +38,13 @@ verdict () { # verdict <reported_status> <trunk_status>
 echo "verdict map:"
 check "both reproduced -> live_bug"            live_bug         "$(verdict reproduced reproduced)"
 check "reported only -> fixed_on_trunk"        fixed_on_trunk   "$(verdict reproduced not_reproduced)"
+check "regression (trunk only) -> regression"  regression       "$(verdict not_reproduced reproduced)"
 check "neither -> not_reproducible"            not_reproducible "$(verdict not_reproduced not_reproduced)"
 check "any blocked -> blocked"                 blocked          "$(verdict blocked reproduced)"
+check "blocked beats unsure"                   blocked          "$(verdict blocked reproduced true)"
 check "single-leg trunk repro -> live_bug"     live_bug         "$(verdict null reproduced)"
 check "single-leg trunk clean -> not_repro"    not_reproducible "$(verdict null not_reproduced)"
-check "inconclusive -> needs_human_review"     needs_human_review "$(verdict inconclusive null)"
+check "inconclusive -> needs_human_review"     needs_human_review "$(verdict inconclusive not_reproduced)"
+check "low-confidence plan -> needs_human"     needs_human_review "$(verdict reproduced reproduced true)"
 
 [ "$fail" = 0 ] && echo "PASS" || { echo "FAILURES"; exit 1; }

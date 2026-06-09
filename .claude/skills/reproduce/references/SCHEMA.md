@@ -128,7 +128,8 @@ Rules:
 {
     "schema_version": "1",
     "issue": 16638,
-    "verdict": "live_bug | fixed_on_trunk | not_reproducible | blocked | needs_human_review",
+    "verdict": "live_bug | fixed_on_trunk | regression | not_reproducible | blocked | needs_human_review",
+    "fix_candidate": "PR#16575 (backport candidate; from analyze derived_from when fixed_on_trunk)",
     "layer": "store-api",
     "results": { "reported": { "...": "result.json" }, "trunk": { "...": "result.json" } },
     "summary": "1-3 sentences naming the symptom and the surface it fired on.",
@@ -137,15 +138,28 @@ Rules:
 }
 ```
 
-Verdict map (first match wins):
+Verdict map (first match wins, top to bottom):
 
-| reported        | trunk            | verdict              |
-| --------------- | ---------------- | -------------------- |
-| `reproduced`    | `reproduced`     | `live_bug`           |
-| `reproduced`    | `not_reproduced` | `fixed_on_trunk`     |
-| `not_reproduced`| `not_reproduced` | `not_reproducible`   |
-| any `blocked`   | —                | `blocked`            |
-| any `inconclusive` or low confidence | — | `needs_human_review` |
+| reported         | trunk            | verdict              |
+| ---------------- | ---------------- | -------------------- |
+| any `blocked`    | —                | `blocked`            |
+| analyze `blocked_reason` set or `confidence < 0.55` | — | `needs_human_review` |
+| any `inconclusive` | —              | `needs_human_review` |
+| `reproduced`     | `reproduced`     | `live_bug`           |
+| `reproduced`     | `not_reproduced` | `fixed_on_trunk`     |
+| `not_reproduced` | `reproduced`     | `regression`         |
+| `not_reproduced` | `not_reproduced` | `not_reproducible`   |
+| anything else    | —                | `needs_human_review` |
+
+Notes:
+
+- `needs_human_review` is **deliberate**, not a catch-all: it fires when the plan is
+  untrustworthy (`blocked_reason`/low confidence) or a leg is `inconclusive`. The
+  trailing row is a logged safety net.
+- `regression` carries a false-negative caveat: a `not_reproduced` reported leg may
+  have under-exercised the symptom (e.g. missing fixture). Surface the caveat.
+- `fix_candidate` is set for `fixed_on_trunk` from analyze's `derived_from` (the fix
+  PR). When absent, the `attribute` phase finds the fixing/introducing commit.
 
 Rules:
 
