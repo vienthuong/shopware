@@ -136,6 +136,10 @@ jobs:
       # Real Analyze agent. Emits analysis.json per references/SCHEMA.md.
       - name: Analyze (agent)
         if: steps.mode.outputs.mode == 'real'
+        # Hitting --max-turns is a hard error in the action; tolerate it so a
+        # complete analysis.json (written before the cap) still counts. The matrix
+        # step fails cleanly if no analysis.json was produced.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
@@ -163,7 +167,7 @@ jobs:
           # context, e.g. off-repo). Widen the READ-ONLY allowlist so the agent stops
           # thrashing on denied tools (denials burn turns -> $). Matches triage's pins.
           claude_args: >-
-            --model claude-sonnet-4-6 --max-turns 15
+            --model claude-sonnet-4-6 --max-turns 40
             --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*)"
 
       # DEMO only: canned plan, reached solely via dry_run=true.
@@ -447,7 +451,7 @@ jobs:
           anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
           claude_args: >-
-            --model claude-sonnet-4-6 --max-turns 12
+            --model claude-sonnet-4-6 --max-turns 20
             --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(rg:*),Bash(cat:*),Bash(ls:*),Bash(jq:*)"
           prompt: |
             The reproduce pipeline returned verdict "${{ needs.verdict.outputs.verdict }}" for issue
