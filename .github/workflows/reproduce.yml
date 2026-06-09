@@ -180,10 +180,11 @@ jobs:
           [ -f analysis.json ] || { echo "::error::no analysis.json produced"; exit 1; }
           cat analysis.json
           VERSION=$(jq -r '.version' analysis.json)
+          # Each leg carries its role (reported|trunk) and the version to display/provision.
           if [ "$IS_MANUAL" = "true" ] || [ "$VERSION" = "trunk" ]; then
-            TARGETS='["trunk"]'
+            TARGETS='[{"role":"trunk","version":"trunk"}]'
           else
-            TARGETS='["reported","trunk"]'
+            TARGETS=$(jq -nc --arg v "$VERSION" '[{role:"reported",version:$v},{role:"trunk",version:"trunk"}]')
           fi
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Computed targets: $TARGETS"
@@ -202,10 +203,12 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Leg label shows the actual version, e.g. "reproduce (6.7.9.0)" / "reproduce (trunk)".
+    name: reproduce (${{ matrix.leg.version }})
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(needs.analyze.outputs.targets) }}
+        leg: ${{ fromJSON(needs.analyze.outputs.targets) }}
     steps:
       # repro tooling (this workflow's repo) at root; the shop is installed under ./shop
       # so setup-shopware's checkout never clobbers analysis.json or the scripts.
@@ -217,16 +220,18 @@ jobs:
           name: analysis
       - id: plan
         env:
-          TARGET: ${{ matrix.target }}
+          ROLE: ${{ matrix.leg.role }}
+          LEG_VERSION: ${{ matrix.leg.version }}
         run: |
           set -euo pipefail
+          echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           EXECUTOR=$(jq -r .executor analysis.json)
           echo "executor=$EXECUTOR" >> "$GITHUB_OUTPUT"
           # reported leg pins the exact released tag; trunk leg uses the moving branch.
-          if [ "$TARGET" = "trunk" ]; then
+          if [ "$ROLE" = "trunk" ]; then
             echo "version=trunk" >> "$GITHUB_OUTPUT"
           else
-            echo "version=v$(jq -r .version analysis.json)" >> "$GITHUB_OUTPUT"
+            echo "version=v$LEG_VERSION" >> "$GITHUB_OUTPUT"
           fi
           echo "admin_build=$(jq -r .build_profile.admin_build analysis.json)" >> "$GITHUB_OUTPUT"
           echo "storefront_build=$(jq -r .build_profile.storefront_build analysis.json)" >> "$GITHUB_OUTPUT"
@@ -242,7 +247,7 @@ jobs:
 
       - name: Run executor
         env:
-          TARGET: ${{ matrix.target }}
+          TARGET: ${{ steps.plan.outputs.role }}
           EXECUTOR: ${{ steps.plan.outputs.executor }}
           APP_URL: ${{ steps.provision.outputs.app_url }}
           SW_ACCESS_KEY: ${{ steps.provision.outputs.access_key }}
@@ -268,7 +273,7 @@ jobs:
           cat result.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: repro-${{ matrix.target }}
+          name: repro-${{ steps.plan.outputs.role }}
           path: result.json
           retention-days: 7
 
