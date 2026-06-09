@@ -37,6 +37,7 @@ The repro plan. Picks the cheapest faithful surface and the minimal build.
         "headers": { "Content-Type": "application/json" },
         "body": "{}"
     },
+    "script_path": "repro.spec.ts",
     "assertion": {
         "kind": "http_status | response_field | exception | ui_state",
         "expect": "400",
@@ -66,6 +67,9 @@ Rules:
 - `request` is required for the `http` executor — the cheapest faithful call that
   triggers the symptom. `assertion.field` is a jq path used only by `response_field`;
   `assertion.locator` is a human reference to the endpoint/UI element.
+- `script_path` is required for the `playwright` executor — the generated spec
+  (`repro.spec.ts`) that asserts the HEALTHY behaviour, generated ONCE by Analyze and
+  reused by both legs (it fails on the buggy version → `reproduced`).
 - `assertion` is derived from the linked fix PR's regression test or an existing test
   when one exists (`derived_from`), not discovered by trial-and-error.
 - `assertion.expect` is the **healthy** value (what a fixed shop returns). A leg is
