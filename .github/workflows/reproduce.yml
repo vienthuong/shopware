@@ -14,12 +14,17 @@ on:
     types: [labeled] # initial trigger: apply the `ci:reproduce` label
   issue_comment:
     types: [created] # initial trigger: comment `/reproduce`
-  workflow_dispatch: # manual rerun (skips the reported-version leg)
+  workflow_dispatch: # on-demand run (BOTH legs by default; opt into trunk-only via skip_reported)
     inputs:
       issue_number:
         description: "Issue number to reproduce"
         required: true
         type: number
+      skip_reported:
+        description: "Re-check trunk only (skip the reported-version leg)"
+        required: false
+        default: false
+        type: boolean
       post_comment:
         description: "Post the result as an issue comment (otherwise job summary only)"
         required: false
@@ -67,6 +72,7 @@ jobs:
       issue: ${{ steps.decide.outputs.issue }}
       is_manual: ${{ steps.decide.outputs.is_manual }}
       post: ${{ steps.decide.outputs.post }}
+      skip_reported: ${{ steps.decide.outputs.skip_reported }}
       needs_info: ${{ steps.decide.outputs.needs_info }}
     steps:
       - id: decide
@@ -77,12 +83,14 @@ jobs:
             const CMD = '/reproduce';
             const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
             const ev = context.eventName;
-            let run = false, issue = '', isManual = false, post = false;
+            let run = false, issue = '', isManual = false, post = false, skipReported = false;
 
             if (ev === 'workflow_dispatch') {
-              // dispatch already requires write access → trusted. This is the manual rerun.
+              // dispatch already requires write access → trusted. Runs BOTH legs unless
+              // skip_reported is set (then it's a trunk-only re-check).
               run = true;
               isManual = true;
+              skipReported = String(context.payload.inputs.skip_reported) === 'true';
               issue = String(context.payload.inputs.issue_number);
               post = String(context.payload.inputs.post_comment) === 'true';
             } else if (ev === 'issues' && context.payload.action === 'labeled') {
@@ -127,8 +135,9 @@ jobs:
             core.setOutput('issue', issue);
             core.setOutput('is_manual', String(isManual));
             core.setOutput('post', String(post));
+            core.setOutput('skip_reported', String(skipReported));
             core.setOutput('needs_info', String(needsInfo));
-            core.info(`event=${ev} run=${run} issue=${issue} manual=${isManual} post=${post} needs_info=${needsInfo}`);
+            core.info(`event=${ev} run=${run} issue=${issue} manual=${isManual} post=${post} skip_reported=${skipReported} needs_info=${needsInfo}`);
 
   # --------------------------------------------------------------------------
   # Analyze: emit the repro plan (analysis.json) and the target matrix.
@@ -294,7 +303,7 @@ jobs:
       # Compute the target matrix from the produced plan (dedup + not-on-manual-rerun).
       - id: matrix
         env:
-          IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
+          SKIP_REPORTED: ${{ needs.gate.outputs.skip_reported }}
           BRANCH: ${{ github.event.inputs.branch || 'trunk' }}
           ISSUE: ${{ needs.gate.outputs.issue }}
           POST: ${{ needs.gate.outputs.post }}
@@ -315,7 +324,8 @@ jobs:
           VERSION=$(jq -r '.version' analysis.json)
           # Each leg carries role (reported|trunk) + the ref to display/provision. The
           # trunk leg uses $BRANCH (default trunk) so you can reproduce against a fix branch.
-          if [ "$IS_MANUAL" = "true" ] || [ "$VERSION" = "$BRANCH" ]; then
+          # Trunk-only when explicitly requested (skip_reported) or reported == the branch.
+          if [ "$SKIP_REPORTED" = "true" ] || [ "$VERSION" = "$BRANCH" ]; then
             TARGETS=$(jq -nc --arg b "$BRANCH" '[{role:"trunk",version:$b}]')
           else
             TARGETS=$(jq -nc --arg v "$VERSION" --arg b "$BRANCH" '[{role:"reported",version:$v},{role:"trunk",version:$b}]')

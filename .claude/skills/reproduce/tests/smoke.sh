@@ -12,12 +12,12 @@ check () { # check <label> <expected> <actual>
 }
 
 # --- target matrix: one leg if manual OR reported == trunk, else two ---
-targets () { # targets <is_manual> <reported_version> <trunk_version>
+targets () { # targets <skip_reported> <reported_version> <trunk_version>
   if [ "$1" = "true" ] || [ "$2" = "$3" ]; then echo '["trunk"]'; else echo '["reported","trunk"]'; fi
 }
 echo "matrix (dedup + not-on-manual-rerun):"
 check "normal -> two legs"        '["reported","trunk"]' "$(targets false 6.6.10.0 trunk)"
-check "manual rerun -> one leg"   '["trunk"]'            "$(targets true  6.6.10.0 trunk)"
+check "skip_reported -> one leg"   '["trunk"]'            "$(targets true  6.6.10.0 trunk)"
 check "reported==trunk -> one leg" '["trunk"]'           "$(targets false trunk    trunk)"
 
 # --- verdict map (first match wins); single-leg runs have reported == null ---
