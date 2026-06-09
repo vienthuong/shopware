@@ -139,6 +139,24 @@ jobs:
           exit 1
 
       # Real Analyze agent. Emits analysis.json per references/SCHEMA.md.
+      # Prefetch the issue + (best-effort) the linked fix PR's diff with cheap gh calls,
+      # so the agent reads them directly instead of spending turns searching/fetching.
+      - name: Prefetch context
+        if: steps.mode.outputs.mode == 'real'
+        env:
+          ISSUE: ${{ needs.gate.outputs.issue }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh issue view "$ISSUE" --repo "$GITHUB_REPOSITORY" --json title,body \
+            --jq '"# " + .title + "\n\n" + (.body // "")' > issue.md 2>/dev/null || echo "(issue body unavailable)" > issue.md
+          # first referenced number that is actually an upstream PR → its diff (capped)
+          for n in $(grep -oE '[0-9]{3,}' issue.md | sort -un); do
+            if gh pr diff "$n" --repo shopware/shopware 2>/dev/null | head -c 40000 > /tmp/d && [ -s /tmp/d ]; then
+              mv /tmp/d fixpr.diff; echo "prefetched fix PR shopware/shopware#$n ($(wc -c <fixpr.diff) bytes)"; break
+            fi
+          done
+
       - name: Analyze (agent)
         id: analyze
         if: steps.mode.outputs.mode == 'real'
@@ -155,12 +173,12 @@ jobs:
           prompt: |
             Run the `reproduce` skill's Analyze phase for issue
             #${{ needs.gate.outputs.issue }} in repository ${{ github.repository }}.
-            Read THAT issue first: `gh issue view ${{ needs.gate.outputs.issue }} --repo ${{ github.repository }}`
-            — do NOT read shopware/shopware#${{ needs.gate.outputs.issue }} unless this IS
-            that repo. The working directory is a shopware checkout (read it for code/DAL
-            schema); a linked fix PR may live upstream — use `--repo shopware/shopware` only
-            for those. Find the linked fix PR's regression test and the relevant code,
-            derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
+            The issue is ALREADY fetched to `./issue.md`, and if a linked fix PR was found
+            its diff is in `./fixpr.diff` — READ THOSE FIRST and do not re-fetch or search
+            when they suffice (saves turns). The working directory is a shopware checkout
+            (read it for code/DAL schema only as needed); for other upstream lookups use
+            `--repo shopware/shopware`. From the issue + fix-PR diff (which contains the
+            regression test), derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
             budget: do the MINIMUM investigation to fill the plan (a few targeted searches,
             NOT a full code tour), then WRITE the output file(s) immediately as your top
             priority. If still uncertain after a handful of tool calls, emit a best-effort
