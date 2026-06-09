@@ -49,6 +49,10 @@ if echo "$NEED" | grep -qvE '^(SW_ACCESS_KEY|STOREFRONT_URL|SW_CONTEXT_TOKEN)?$'
   SCJ=$(q sales-channel '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}')
   SC=$(echo "$SCJ" | jq -r '.data[0].id // empty')
   NAV_CAT=$(echo "$SCJ" | jq -r '.data[0].navigationCategoryId // empty')
+  # storefrontUrl must be a registered SC domain (a basic-setup default SC is headless,
+  # domain "default.headlessN"), NOT APP_URL. Resolve the real domain when present.
+  SCDOM=$(q sales-channel-domain '{"limit":1}' | jq -r '.data[0].url // empty')
+  [ -n "$SCDOM" ] && STOREFRONT_URL="$SCDOM"
   COUNTRY=$(q country '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}' | jq -r '.data[0].id // empty')
   SALS=$(q salutation '{"limit":2}')
   SALUTATION=$(echo "$SALS" | jq -r '.data[0].id // empty')
