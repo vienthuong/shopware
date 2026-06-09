@@ -580,9 +580,17 @@ jobs:
             for t in reported trunk; do
               f="artifacts/repro-${t}/result.json"
               [ -f "$f" ] || continue
-              st=$(jq -r .status "$f"); ex=$(jq -r .assertion.expect "$f"); ac=$(jq -r .assertion.actual "$f")
+              st=$(jq -r .status "$f"); br=$(jq -r '.blocked_reason // ""' "$f")
               echo
-              echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
+              if [ -n "$br" ] && [ "$br" != "null" ]; then
+                # blocked/inconclusive: the assertion never ran — show WHY (incl. the failing response body)
+                echo "### ${t} — \`${st}\`"
+                echo
+                echo "> ⚠️ ${br}"
+              else
+                ex=$(jq -r .assertion.expect "$f"); ac=$(jq -r .assertion.actual "$f")
+                echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
+              fi
               echo
               echo '```sh'
               jq -r .evidence.script "$f"
