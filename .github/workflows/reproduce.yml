@@ -551,7 +551,9 @@ jobs:
           } > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
       - name: Post comment
-        if: needs.gate.outputs.post == 'true'
+        # 'blocked' = the repro env/seed failed (infra), not a bug verdict → keep it in the
+        # job summary, don't post public noise on the issue. Real verdicts still post.
+        if: needs.gate.outputs.post == 'true' && needs.verdict.outputs.verdict != 'blocked'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |

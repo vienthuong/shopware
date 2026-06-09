@@ -44,7 +44,7 @@ if echo "$NEED" | grep -qvE '^(SW_ACCESS_KEY|STOREFRONT_URL|SW_CONTEXT_TOKEN)?$'
     -d "{\"grant_type\":\"password\",\"client_id\":\"administration\",\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\",\"scopes\":\"write\"}" \
     | jq -r '.access_token // empty')
   [ -n "$TOKEN" ] || { echo "::error::admin token failed (needed to resolve request ids)"; exit 1; }
-  A=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+  A=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Accept: application/json')
   q() { curl -sS --max-time 30 -X POST "$BASE/api/search/$1" "${A[@]}" -d "$2"; }
   SCJ=$(q sales-channel '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}')
   SC=$(echo "$SCJ" | jq -r '.data[0].id // empty')

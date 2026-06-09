@@ -30,7 +30,9 @@ TOKEN=$(curl -sS --max-time 30 -X POST "$BASE/api/oauth/token" \
   -d "{\"grant_type\":\"password\",\"client_id\":\"administration\",\"username\":\"$USER\",\"password\":\"$PASS\",\"scopes\":\"write\"}" \
   | jq -r '.access_token // empty')
 [ -n "$TOKEN" ] || { echo "::error::admin token request failed"; exit 1; }
-AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+# Accept: application/json → flat response (id + navigationCategoryId at top level);
+# without it /api/search returns JSON:API where nested fields live under .attributes.
+AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Accept: application/json')
 
 # 2. Resolve install-specific ids referenced by the payload as placeholders.
 search () { curl -sS --max-time 30 -X POST "$BASE/api/search/$1" "${AUTH[@]}" -d "$2"; }
@@ -39,6 +41,14 @@ SC=$(echo "$SC_JSON"  | jq -r '.data[0].id // empty')
 NAV=$(echo "$SC_JSON" | jq -r '.data[0].navigationCategoryId // empty')
 TAX=$(search tax '{"limit":1}'      | jq -r '.data[0].id // empty')
 CUR=$(search currency '{"limit":1,"filter":[{"type":"equals","field":"isoCode","value":"EUR"}]}' | jq -r '.data[0].id // empty')
+
+# Fail loud if a referenced placeholder resolved to EMPTY (else we'd POST an empty UUID).
+for kv in "SC:$SC" "NAV_CAT:$NAV" "TAX:$TAX" "CURRENCY:$CUR"; do
+  k=${kv%%:*}; v=${kv#*:}
+  if grep -q "{{$k}}" "$PAYLOAD" && [ -z "$v" ]; then
+    echo "::error::could not resolve {{$k}} (admin search returned empty)"; exit 1
+  fi
+done
 
 OUT=$(mktemp)
 sed -e "s/{{SC}}/$SC/g" -e "s/{{NAV_CAT}}/$NAV/g" -e "s/{{TAX}}/$TAX/g" -e "s/{{CURRENCY}}/$CUR/g" "$PAYLOAD" > "$OUT"
