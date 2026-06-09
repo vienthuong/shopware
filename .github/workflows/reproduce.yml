@@ -149,7 +149,9 @@ jobs:
             and write ONLY the analysis.json object (per
             .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
             workspace root. No prose, no markdown fence. Do not comment or label.
-          claude_args: '--allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
+          # Pin Sonnet: Analyze is a bounded read-issue+test -> emit-JSON task. The
+          # action otherwise defaults to Opus (~$1.5/run). Matches triage's engine pin.
+          claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
 
       # DEMO only: canned plan, reached solely via dry_run=true.
       - name: Analyze (dry-run demo)
@@ -290,8 +292,21 @@ jobs:
           set -euo pipefail
           REP="artifacts/repro-reported/result.json"
           TRU="artifacts/repro-trunk/result.json"
-          LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
 
+          # No leg produced a report (reproduce aborted/cancelled/failed) → do NOT
+          # post a content-free verdict. Skip the comment; note it in the summary.
+          if [ ! -f "$REP" ] && [ ! -f "$TRU" ]; then
+            echo "has_results=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No reproduce leg produced a result — skipping verdict comment."
+            {
+              echo "## Reproduction — Issue #${ISSUE}: _no result_"
+              echo "No leg produced a \`result.json\` (reproduce was skipped, cancelled, or failed). No comment posted."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "has_results=true" >> "$GITHUB_OUTPUT"
+
+          LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
           rep="null"; tru="null"
           [ -f "$REP" ] && rep=$(jq -r .status "$REP")
           [ -f "$TRU" ] && tru=$(jq -r .status "$TRU")
@@ -327,7 +342,7 @@ jobs:
           } > comment.md
           cat comment.md >> "$GITHUB_STEP_SUMMARY"
       - name: Post comment
-        if: needs.gate.outputs.post == 'true'
+        if: needs.gate.outputs.post == 'true' && steps.merge.outputs.has_results == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |

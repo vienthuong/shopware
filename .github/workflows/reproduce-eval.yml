@@ -42,6 +42,7 @@ jobs:
         working-directory: .claude/skills/reproduce/tests
         env:
           ANTHROPIC_API_KEY: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: claude-sonnet-4-6 # bounded task; avoid the Opus default
         run: |
           set -euo pipefail
           ARGS="--provider=local --agent=claude --ci --threshold=0.8"
