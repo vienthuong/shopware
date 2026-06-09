@@ -30,6 +30,16 @@ on:
         required: false
         default: false
         type: boolean
+      branch:
+        description: "Branch/ref the trunk leg reproduces against (defaults to trunk)"
+        required: false
+        default: "trunk"
+        type: string
+      max_turns:
+        description: "Cap on the Analyze agent's turns (cost control; default 25)"
+        required: false
+        default: "25"
+        type: string
 
 concurrency:
   group: reproduce-${{ github.event.issue.number || inputs.issue_number }}
@@ -219,7 +229,7 @@ jobs:
           # context, e.g. off-repo). Widen the READ-ONLY allowlist so the agent stops
           # thrashing on denied tools (denials burn turns -> $). Matches triage's pins.
           claude_args: >-
-            --model claude-sonnet-4-6 --max-turns 40
+            --model claude-sonnet-4-6 --max-turns ${{ github.event.inputs.max_turns || '25' }}
             --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(gh api:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(wc:*)"
 
       # DEMO only: canned plan, reached solely via dry_run=true.
@@ -257,16 +267,18 @@ jobs:
       - id: matrix
         env:
           IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
+          BRANCH: ${{ github.event.inputs.branch || 'trunk' }}
         run: |
           set -euo pipefail
           [ -f analysis.json ] || { echo "::error::no analysis.json produced"; exit 1; }
           cat analysis.json
           VERSION=$(jq -r '.version' analysis.json)
-          # Each leg carries its role (reported|trunk) and the version to display/provision.
-          if [ "$IS_MANUAL" = "true" ] || [ "$VERSION" = "trunk" ]; then
-            TARGETS='[{"role":"trunk","version":"trunk"}]'
+          # Each leg carries role (reported|trunk) + the ref to display/provision. The
+          # trunk leg uses $BRANCH (default trunk) so you can reproduce against a fix branch.
+          if [ "$IS_MANUAL" = "true" ] || [ "$VERSION" = "$BRANCH" ]; then
+            TARGETS=$(jq -nc --arg b "$BRANCH" '[{role:"trunk",version:$b}]')
           else
-            TARGETS=$(jq -nc --arg v "$VERSION" '[{role:"reported",version:$v},{role:"trunk",version:"trunk"}]')
+            TARGETS=$(jq -nc --arg v "$VERSION" --arg b "$BRANCH" '[{role:"reported",version:$v},{role:"trunk",version:$b}]')
           fi
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Computed targets: $TARGETS"
@@ -289,8 +301,9 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Leg label shows the actual version, e.g. "reproduce (6.7.9.0)" / "reproduce (trunk)".
-    name: reproduce (${{ matrix.leg.version }})
+    # Leg label shows the version when the matrix expands ("reproduce (6.7.9.0)"); degrades
+    # to plain "reproduce" when analyze fails and the matrix never expands.
+    name: reproduce${{ matrix.leg.version && format(' ({0})', matrix.leg.version) || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -313,9 +326,10 @@ jobs:
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           EXECUTOR=$(jq -r .executor analysis.json)
           echo "executor=$EXECUTOR" >> "$GITHUB_OUTPUT"
-          # reported leg pins the exact released tag; trunk leg uses the moving branch.
+          # trunk leg provisions the branch ref as-is (default trunk); reported leg pins the
+          # exact released tag (v-prefixed).
           if [ "$ROLE" = "trunk" ]; then
-            echo "version=trunk" >> "$GITHUB_OUTPUT"
+            echo "version=$LEG_VERSION" >> "$GITHUB_OUTPUT"
           else
             echo "version=v$LEG_VERSION" >> "$GITHUB_OUTPUT"
           fi
