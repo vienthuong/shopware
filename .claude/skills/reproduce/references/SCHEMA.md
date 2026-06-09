@@ -88,6 +88,16 @@ Rules:
 - `script_path` is required for the `playwright` executor — the generated spec
   (`repro.spec.ts`) that asserts the HEALTHY behaviour, generated ONCE by Analyze and
   reused by both legs (it fails on the buggy version → `reproduced`).
+- `script_path` is also required for the `direct` executor — a generated PHPUnit
+  integration test (`ReproTest.php`, namespace `Shopware\Tests\Integration\Repro`,
+  `extends TestCase` with `IntegrationTestBehaviour`). `run-direct.sh` drops it under the
+  shop's `tests/integration/Repro/` (PSR-4 autoload) and runs `vendor/bin/phpunit`. The
+  test asserts the HEALTHY behaviour, so the summary maps: `OK` → `not_reproduced`,
+  `FAILURES!` → `reproduced`, `ERRORS!`/fatal/no-tests → `inconclusive` (the test could not
+  bootstrap — usually a cross-version API mismatch on the reported leg, never a bogus pass),
+  anything else → `blocked`. Use the `direct` layer only when neither `http` nor
+  `playwright` can fire the bug faithfully (license-gated, internal service, heavy domain
+  setup); reuse the fix PR's regression-test setup rather than reinventing it.
 - `scenario` is a plain-English, numbered Given/When/Then list of the repro steps,
   rendered in the comment above the script so a human reads the intent first. The
   generated script (curl or spec) must comment every step (what it does + asserts).

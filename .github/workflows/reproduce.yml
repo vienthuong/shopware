@@ -258,7 +258,18 @@ jobs:
             {{SC}}/{{COUNTRY}}/{{SALUTATION}}/{{SALUTATION2}}/{{STOREFRONT_URL}} placeholders
             the executor resolves. For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
             (referenced by script_path) — it must assert the HEALTHY behaviour and use
-            relative paths (baseURL is injected). Include `scenario` in analysis.json: a
+            relative paths (baseURL is injected). For a `direct`/`service` layer (a bug that
+            can't fire faithfully through store-api or the UI — license-gated, an internal
+            service, or heavy domain setup), ALSO generate a minimal PHPUnit integration test
+            as `ReproTest.php` (referenced by script_path): namespace
+            `Shopware\Tests\Integration\Repro`, class `ReproTest extends TestCase` using
+            `IntegrationTestBehaviour` + `KernelTestBehaviour`, services from
+            `$this->getContainer()`. REUSE the fix PR's regression-test setup where it exists
+            (./fixpr.diff) — do NOT reinvent the bootstrap. The single test method must ASSERT
+            THE HEALTHY (fixed) behaviour so it fails on the buggy version. Prefer STABLE
+            service/DAL APIs so the same test also runs on the reported version; if it can
+            only compile on trunk, that is fine (the reported leg reports `inconclusive`,
+            never a bogus pass). Include `scenario` in analysis.json: a
             plain-English, numbered Given/When/Then list of the repro steps. Comment EVERY
             step of the generated script (curl or spec) explaining what it does and what it
             asserts. Emit only those file(s) — no prose, no markdown fence. Do not comment or label.
@@ -391,7 +402,7 @@ jobs:
       # Provision only when an executor needs a live shop (http/playwright). Build only the surface.
       # continue-on-error: a dead env blocks THIS leg, it must not kill the run (the other leg + report still go).
       - id: provision
-        if: steps.plan.outputs.executor == 'http' || steps.plan.outputs.executor == 'playwright'
+        if: steps.plan.outputs.executor == 'http' || steps.plan.outputs.executor == 'playwright' || steps.plan.outputs.executor == 'direct'
         continue-on-error: true
         uses: ./.github/actions/repro/provision
         with:
@@ -456,16 +467,19 @@ jobs:
               ANALYSIS=analysis.json OUT=result.json \
                 bash .github/actions/repro/bin/run-playwright.sh
               ;;
+            direct)
+              ANALYSIS=analysis.json OUT=result.json SHOP_DIR=shop \
+                bash .github/actions/repro/bin/run-direct.sh
+              ;;
             *)
-              # ===== STUB: direct → phpunit (still a stub) =====
-              echo "::warning::executor '$EXECUTOR' not yet implemented; emitting inconclusive"
+              echo "::warning::unknown executor '$EXECUTOR'; emitting inconclusive"
               jq -n --argjson issue "$(jq -r .issue analysis.json)" --arg target "$TARGET" \
                 --arg version "$(jq -r .version analysis.json)" --arg executor "$EXECUTOR" '{
                   schema_version:"1", issue:$issue, target:$target, version:$version, executor:$executor,
                   status:"inconclusive", assertion:{expect:null,actual:null,matched:null}, duration_s:0,
-                  evidence:{script:"", script_lang:"sh", reporter_output:"executor not implemented",
+                  evidence:{script:"", script_lang:"sh", reporter_output:("unknown executor "+$executor),
                     http:[], artifacts:[], truncated:false},
-                  blocked_reason:("executor "+$executor+" is still a stub") }' > result.json
+                  blocked_reason:("unknown executor "+$executor) }' > result.json
               ;;
           esac
           cat result.json
@@ -477,8 +491,9 @@ jobs:
             result.json
             repro.sh
             repro.spec.ts
+            ReproTest.php
             test-results/
-          if-no-files-found: ignore # the runnable script (repro.sh|repro.spec.ts) + test-results/ vary by executor
+          if-no-files-found: ignore # the runnable script (repro.sh|repro.spec.ts|ReproTest.php) + test-results/ vary by executor
           retention-days: 7
 
   # --------------------------------------------------------------------------
