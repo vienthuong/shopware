@@ -326,9 +326,9 @@ jobs:
           # trunk leg uses $BRANCH (default trunk) so you can reproduce against a fix branch.
           # Trunk-only when explicitly requested (skip_reported) or reported == the branch.
           if [ "$SKIP_REPORTED" = "true" ] || [ "$VERSION" = "$BRANCH" ]; then
-            TARGETS=$(jq -nc --arg b "$BRANCH" '[{role:"trunk",version:$b}]')
+            TARGETS=$(jq -nc --arg b "$BRANCH" '[$b]')
           else
-            TARGETS=$(jq -nc --arg v "$VERSION" --arg b "$BRANCH" '[{role:"reported",version:$v},{role:"trunk",version:$b}]')
+            TARGETS=$(jq -nc --arg v "$VERSION" --arg b "$BRANCH" '[$v,$b]')
           fi
           echo "targets=$TARGETS" >> "$GITHUB_OUTPUT"
           echo "Computed targets: $TARGETS"
@@ -351,13 +351,13 @@ jobs:
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Leg label shows the version when the matrix expands ("reproduce (6.7.9.0)"); degrades
-    # to plain "reproduce" when analyze fails and the matrix never expands.
-    name: reproduce${{ matrix.leg.version && format(' ({0})', matrix.leg.version) || '' }}
+    # No explicit name: the matrix is a list of version strings, so GitHub's default
+    # label is "reproduce (6.7.9.0)" when it runs and a clean "reproduce" when skipped
+    # (an explicit name template would render the raw ${{ }} on a skipped matrix job).
     strategy:
       fail-fast: false
       matrix:
-        leg: ${{ fromJSON(needs.analyze.outputs.targets) }}
+        version: ${{ fromJSON(needs.analyze.outputs.targets) }}
     steps:
       # repro tooling (this workflow's repo) at root; the shop is installed under ./shop
       # so setup-shopware's checkout never clobbers analysis.json or the scripts.
@@ -369,10 +369,12 @@ jobs:
           name: analysis
       - id: plan
         env:
-          ROLE: ${{ matrix.leg.role }}
-          LEG_VERSION: ${{ matrix.leg.version }}
+          LEG_VERSION: ${{ matrix.version }}
+          BRANCH: ${{ github.event.inputs.branch || 'trunk' }}
         run: |
           set -euo pipefail
+          # role derived: the leg whose version is the branch is "trunk", else "reported".
+          if [ "$LEG_VERSION" = "$BRANCH" ]; then ROLE=trunk; else ROLE=reported; fi
           echo "role=$ROLE" >> "$GITHUB_OUTPUT"
           EXECUTOR=$(jq -r .executor analysis.json)
           echo "executor=$EXECUTOR" >> "$GITHUB_OUTPUT"
