@@ -103,13 +103,15 @@ for i in $(seq 0 $((NREQ - 1))); do
   T=$(grep -i '^sw-context-token:' "$HEAD" 2>/dev/null | tail -1 | tr -d '\r' | sed 's/^[^:]*:[[:space:]]*//' || true)
   [ -n "$T" ] && CTX="$T"
   # a non-final SETUP request must succeed, else the repro can't proceed
-  if [ "$i" -lt $((NREQ - 1)) ] && ! [[ "$CODE" =~ ^2 ]]; then blocked="setup request $((i + 1)) ($M $P) returned HTTP $CODE"; break; fi
+  if [ "$i" -lt $((NREQ - 1)) ] && ! [[ "$CODE" =~ ^2 ]]; then
+    blocked="setup request $((i + 1)) ($M $P) returned HTTP $CODE — $(head -c 400 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"; break
+  fi
 done
 
 if [ -n "$blocked" ]; then
-  STATUS="blocked"; MATCHED="null"; ACTUAL="null"; REASON="\"$blocked\""; REPORTER="$blocked"
+  STATUS="blocked"; MATCHED="null"; ACTUAL="null"; REASON_TEXT="$blocked"; REPORTER="$blocked"
 else
-  REASON="null"
+  REASON_TEXT=""
   case "$KIND" in
     http_status) ACTUAL_RAW="$CODE"; REPORTER="HTTP $CODE (expected $EXPECT)" ;;
     response_field)
@@ -120,7 +122,8 @@ else
   # Guard: a missing field on a non-2xx response means the call was malformed/failed,
   # not that the symptom occurred → inconclusive, never a bogus "reproduced".
   if [ "$KIND" = "response_field" ] && { [ "$ACTUAL_RAW" = "<unparseable>" ] || [ "$ACTUAL_RAW" = "null" ]; } && ! [[ "$CODE" =~ ^2 ]]; then
-    STATUS="inconclusive"; MATCHED="null"; ACTUAL="\"$ACTUAL_RAW\""; REASON="\"final request returned HTTP $CODE and the asserted field is absent — request likely malformed\""
+    STATUS="inconclusive"; MATCHED="null"; ACTUAL="\"$ACTUAL_RAW\""
+    REASON_TEXT="final request returned HTTP $CODE, asserted field absent (likely malformed) — body: $(head -c 400 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"
   elif [ "$ACTUAL_RAW" = "$EXPECT" ]; then
     STATUS="not_reproduced"; MATCHED="true"; ACTUAL="\"$ACTUAL_RAW\""
   else
@@ -135,14 +138,14 @@ jq -n \
   --arg target "$TARGET" --arg version "$VERSION" --arg status "$STATUS" \
   --arg expect "$EXPECT" --argjson actual "$ACTUAL" --argjson matched "$MATCHED" \
   --arg script "$SCRIPT" --arg reporter "$REPORTER" --argjson code "${CODE:-0}" \
-  --argjson reason "$REASON" '{
+  --arg reason_text "$REASON_TEXT" '{
     schema_version: "1", issue: $issue, target: $target, version: $version, executor: "http",
     status: $status,
     assertion: { expect: $expect, actual: ($actual | if . == null then null else tostring end), matched: $matched },
     duration_s: 0,
     evidence: { script: $script, script_lang: "sh", reporter_output: $reporter,
       http: [{ status: $code }], artifacts: [], truncated: false },
-    blocked_reason: $reason
+    blocked_reason: (if $reason_text == "" then null else $reason_text end)
   }' > "$OUT"
 
 echo "status=$STATUS  ($REPORTER)"
