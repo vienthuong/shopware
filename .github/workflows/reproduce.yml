@@ -140,6 +140,7 @@ jobs:
 
       # Real Analyze agent. Emits analysis.json per references/SCHEMA.md.
       - name: Analyze (agent)
+        id: analyze
         if: steps.mode.outputs.mode == 'real'
         # Hitting --max-turns is a hard error in the action; tolerate it so a
         # complete analysis.json (written before the cap) still counts. The matrix
@@ -207,6 +208,18 @@ jobs:
             assertion: { kind: "http_status", expect: "400", field: null, locator: "/store-api/checkout/cart" },
             derived_from: "DEMO (dry-run)", confidence: 0.0, blocked_reason: null
           }' > analysis.json
+
+      # Capture the agent transcript (tool calls, denials, per-turn breakdown) for cost
+      # analysis. Fork/dev only — gate behind debug before the real shopware PR (tool
+      # outputs can be sensitive on a public repo).
+      - name: Upload agent transcript (debug)
+        if: always() && steps.analyze.outputs.execution_file != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: analyze-transcript
+          path: ${{ steps.analyze.outputs.execution_file }}
+          if-no-files-found: ignore
+          retention-days: 7
 
       # Compute the target matrix from the produced plan (dedup + not-on-manual-rerun).
       - id: matrix
