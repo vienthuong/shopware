@@ -35,15 +35,21 @@ TOKEN=$(curl -sS --max-time 30 -X POST "$BASE/api/oauth/token" \
 AUTH=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -H 'Accept: application/json')
 
 # 2. Resolve install-specific ids referenced by the payload as placeholders.
+# NOTE: keep this set in sync with run-http.sh's resolver (the two diverged once).
 search () { curl -sS --max-time 30 -X POST "$BASE/api/search/$1" "${AUTH[@]}" -d "$2"; }
 SC_JSON=$(search sales-channel '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}')
 SC=$(echo "$SC_JSON"  | jq -r '.data[0].id // empty')
 NAV=$(echo "$SC_JSON" | jq -r '.data[0].navigationCategoryId // empty')
 TAX=$(search tax '{"limit":1}'      | jq -r '.data[0].id // empty')
 CUR=$(search currency '{"limit":1,"filter":[{"type":"equals","field":"isoCode","value":"EUR"}]}' | jq -r '.data[0].id // empty')
+COUNTRY=$(search country '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}' | jq -r '.data[0].id // empty')
+SALS=$(search salutation '{"limit":2}')
+SAL=$(echo "$SALS"  | jq -r '.data[0].id // empty')
+SAL2=$(echo "$SALS" | jq -r '.data[1].id // .data[0].id // empty')
+LANG=$(search language '{"limit":1}' | jq -r '.data[0].id // empty')
 
 # Fail loud if a referenced placeholder resolved to EMPTY (else we'd POST an empty UUID).
-for kv in "SC:$SC" "NAV_CAT:$NAV" "TAX:$TAX" "CURRENCY:$CUR"; do
+for kv in "SC:$SC" "NAV_CAT:$NAV" "TAX:$TAX" "CURRENCY:$CUR" "COUNTRY:$COUNTRY" "SALUTATION:$SAL" "SALUTATION2:$SAL2" "LANGUAGE:$LANG"; do
   k=${kv%%:*}; v=${kv#*:}
   if grep -q "{{$k}}" "$PAYLOAD" && [ -z "$v" ]; then
     echo "::error::could not resolve {{$k}} (admin search returned empty)"; exit 1
@@ -51,7 +57,8 @@ for kv in "SC:$SC" "NAV_CAT:$NAV" "TAX:$TAX" "CURRENCY:$CUR"; do
 done
 
 OUT=$(mktemp)
-sed -e "s/{{SC}}/$SC/g" -e "s/{{NAV_CAT}}/$NAV/g" -e "s/{{TAX}}/$TAX/g" -e "s/{{CURRENCY}}/$CUR/g" "$PAYLOAD" > "$OUT"
+sed -e "s/{{SC}}/$SC/g" -e "s/{{NAV_CAT}}/$NAV/g" -e "s/{{TAX}}/$TAX/g" -e "s/{{CURRENCY}}/$CUR/g" \
+    -e "s/{{COUNTRY}}/$COUNTRY/g" -e "s/{{SALUTATION2}}/$SAL2/g" -e "s/{{SALUTATION}}/$SAL/g" -e "s/{{LANGUAGE}}/$LANG/g" "$PAYLOAD" > "$OUT"
 
 # Fail loud if any placeholder is still unresolved (would seed broken entities).
 if grep -q '{{' "$OUT"; then
