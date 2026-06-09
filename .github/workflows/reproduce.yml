@@ -154,8 +154,13 @@ jobs:
             that repo. The working directory is a shopware checkout (read it for code/DAL
             schema); a linked fix PR may live upstream — use `--repo shopware/shopware` only
             for those. Find the linked fix PR's regression test and the relevant code,
-            derive the cheapest faithful plan,
-            and write the analysis.json object (per
+            derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
+            budget: do the MINIMUM investigation to fill the plan (a few targeted searches,
+            NOT a full code tour), then WRITE the output file(s) immediately as your top
+            priority. If still uncertain after a handful of tool calls, emit a best-effort
+            plan with a lower `confidence` rather than exploring further. For a playwright
+            layer, write a SIMPLE spec — do not perfect the selectors.
+            Write the analysis.json object (per
             .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
             workspace root. If the repro needs seeded entities, ALSO write the admin
             sync payload to `fixtures.json` (the path in fixtures.sync_payload_path),
