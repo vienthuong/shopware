@@ -147,9 +147,14 @@ jobs:
           # exchange (the App is installed on shopware/shopware, but not everywhere).
           github_token: ${{ github.token }}
           prompt: |
-            Run the `reproduce` skill's Analyze phase for issue #${{ needs.gate.outputs.issue }}
-            in this shopware/shopware checkout. Read the issue, find the linked fix PR's
-            regression test and the relevant DAL schema, derive the cheapest faithful plan,
+            Run the `reproduce` skill's Analyze phase for issue
+            #${{ needs.gate.outputs.issue }} in repository ${{ github.repository }}.
+            Read THAT issue first: `gh issue view ${{ needs.gate.outputs.issue }} --repo ${{ github.repository }}`
+            — do NOT read shopware/shopware#${{ needs.gate.outputs.issue }} unless this IS
+            that repo. The working directory is a shopware checkout (read it for code/DAL
+            schema); a linked fix PR may live upstream — use `--repo shopware/shopware` only
+            for those. Find the linked fix PR's regression test and the relevant code,
+            derive the cheapest faithful plan,
             and write the analysis.json object (per
             .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
             workspace root. If the repro needs seeded entities, ALSO write the admin
