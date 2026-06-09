@@ -51,7 +51,8 @@ The repro plan. Picks the cheapest faithful surface and the minimal build.
     "plugins": [{ "name": "SwagFoo", "activate": true }],
     "derived_from": "PR#16640 tests/.../MultiWarehouseTest.php",
     "confidence": 0.82,
-    "blocked_reason": null
+    "blocked_reason": null,
+    "needs_info": null
 }
 ```
 
@@ -98,6 +99,12 @@ Rules:
   it fails on the buggy version and passes on the fixed one.
 - `confidence < 0.55`, or no faithful layer found → set `blocked_reason`; Report emits
   `needs_human_review`.
+- **`needs_info`**: when the issue is too vague/contradictory/incomplete to derive a
+  FAITHFUL plan, emit ONLY `{schema_version, issue, needs_info: "<one specific question>"}`
+  and omit the plan. The workflow posts the question and aborts — no provisioning. (A
+  cheaper deterministic version runs first in `gate`: a missing "Steps to reproduce"
+  section is rejected before any agent runs.) `needs_info` is a terminal state, like
+  `blocked`/`needs_human_review`.
 
 ## Repro Result (`result.json`)
 

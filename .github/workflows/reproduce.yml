@@ -67,6 +67,7 @@ jobs:
       issue: ${{ steps.decide.outputs.issue }}
       is_manual: ${{ steps.decide.outputs.is_manual }}
       post: ${{ steps.decide.outputs.post }}
+      needs_info: ${{ steps.decide.outputs.needs_info }}
     steps:
       - id: decide
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -100,11 +101,34 @@ jobs:
               }
             }
 
+            // Dumb pre-check (no agent): the issue must have usable "Steps to reproduce".
+            // If not, ask for them and abort — don't spend an agent/provision on a vague issue.
+            let needsInfo = false;
+            if (run && issue) {
+              const { owner, repo } = context.repo;
+              let body = '';
+              try {
+                const { data } = await github.rest.issues.get({ owner, repo, issue_number: Number(issue) });
+                body = data.body || '';
+              } catch (e) { core.warning('could not fetch issue body: ' + e.message); }
+              const m = body.match(/steps to reproduce[:\s]*([\s\S]*?)(?=\n\s*#{1,6}\s|$)/i);
+              const steps = m ? m[1].replace(/[\s>*#-]/g, ' ').trim() : '';
+              if (steps.length < 15) {
+                needsInfo = true; run = false;
+                core.warning('no usable "Steps to reproduce" — requesting info, aborting');
+                if (post) {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: Number(issue),
+                    body: "## Reproduction — needs info\n\nI couldn't find usable **Steps to reproduce** in this issue. Please add a clear, numbered reproduction and the affected Shopware version, then re-apply the `ci:reproduce` label." });
+                }
+              }
+            }
+
             core.setOutput('run', String(run));
             core.setOutput('issue', issue);
             core.setOutput('is_manual', String(isManual));
             core.setOutput('post', String(post));
-            core.info(`event=${ev} run=${run} issue=${issue} manual=${isManual} post=${post}`);
+            core.setOutput('needs_info', String(needsInfo));
+            core.info(`event=${ev} run=${run} issue=${issue} manual=${isManual} post=${post} needs_info=${needsInfo}`);
 
   # --------------------------------------------------------------------------
   # Analyze: emit the repro plan (analysis.json) and the target matrix.
@@ -117,7 +141,7 @@ jobs:
     timeout-minutes: 15 # the agent reads the issue + fix-PR test + schema
     permissions:
       contents: read # checkout
-      issues: read # agent reads the issue via gh
+      issues: write # agent reads the issue + posts a clarifying question when info is missing
       id-token: write # claude-code-action fetches a GitHub token via OIDC
     outputs:
       targets: ${{ steps.matrix.outputs.targets }}
@@ -198,7 +222,11 @@ jobs:
             in `./fixpr.diff` — READ THOSE FIRST and do not re-fetch/search when they suffice
             (saves turns). Follow any OTHER linked issue/PR only if these are insufficient
             (use `--repo shopware/shopware`). The working directory is a shopware checkout —
-            read it for code/DAL schema only as needed. Derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
+            read it for code/DAL schema only as needed. If the issue is too vague,
+            contradictory, or missing essentials to derive a FAITHFUL plan, do NOT guess —
+            write analysis.json as {"schema_version":"1","issue":N,"needs_info":"<one
+            specific clarifying question>"} and stop (the pipeline will ask and abort).
+            Otherwise derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
             budget: do the MINIMUM investigation to fill the plan (a few targeted searches,
             NOT a full code tour), then WRITE the output file(s) immediately as your top
             priority. If still uncertain after a handful of tool calls, emit a best-effort
@@ -268,10 +296,22 @@ jobs:
         env:
           IS_MANUAL: ${{ needs.gate.outputs.is_manual }}
           BRANCH: ${{ github.event.inputs.branch || 'trunk' }}
+          ISSUE: ${{ needs.gate.outputs.issue }}
+          POST: ${{ needs.gate.outputs.post }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [ -f analysis.json ] || { echo "::error::no analysis.json produced"; exit 1; }
           cat analysis.json
+          # Analyze judged the issue too ambiguous to reproduce faithfully → ask, don't guess.
+          NEEDS=$(jq -r '.needs_info // empty' analysis.json)
+          if [ -n "$NEEDS" ]; then
+            echo "::warning::analyze needs info: $NEEDS"
+            [ "$POST" = "true" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" \
+              --body "## Reproduction — needs info"$'\n\n'"$NEEDS"
+            echo "targets=[]" >> "$GITHUB_OUTPUT"   # no legs → reproduce/report skip
+            exit 0
+          fi
           VERSION=$(jq -r '.version' analysis.json)
           # Each leg carries role (reported|trunk) + the ref to display/provision. The
           # trunk leg uses $BRANCH (default trunk) so you can reproduce against a fix branch.
