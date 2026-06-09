@@ -31,6 +31,11 @@ The repro plan. Picks the cheapest faithful surface and the minimal build.
         "demodata": false,
         "sync_payload_path": "/tmp/repro/fixtures.json"
     },
+    "scenario": [
+        "Given a category with at least one product visible in the Storefront sales channel",
+        "When POST /store-api/product-listing/{categoryId}?p=99 (a page past the last)",
+        "Then a healthy shop returns HTTP 404 with PRODUCT__LISTING_PAGE_OUT_OF_RANGE"
+    ],
     "request": {
         "method": "POST",
         "path": "/store-api/checkout/cart",
@@ -70,6 +75,9 @@ Rules:
 - `script_path` is required for the `playwright` executor — the generated spec
   (`repro.spec.ts`) that asserts the HEALTHY behaviour, generated ONCE by Analyze and
   reused by both legs (it fails on the buggy version → `reproduced`).
+- `scenario` is a plain-English, numbered Given/When/Then list of the repro steps,
+  rendered in the comment above the script so a human reads the intent first. The
+  generated script (curl or spec) must comment every step (what it does + asserts).
 - `assertion` is derived from the linked fix PR's regression test or an existing test
   when one exists (`derived_from`), not discovered by trial-and-error.
 - `assertion.expect` is the **healthy** value (what a fixed shop returns). A leg is

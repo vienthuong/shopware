@@ -53,6 +53,8 @@ else
 fi
 # Verbatim, reproducible, redacted: literal $APP_URL (no host leak), redacted key.
 SCRIPT="curl -sS -X $METHOD \"\$APP_URL$REQ_PATH\"$DISPLAY_H$DISPLAY_BODY"
+# Also drop the runnable script as a file in the leg bundle (for the artifact).
+{ echo '#!/usr/bin/env bash'; echo '# Reproduction request — set $APP_URL (and SW_ACCESS_KEY for store-api).'; echo "$SCRIPT"; } > repro.sh
 
 # One bounded retry on transport failure, then `blocked` (dead env — don't grind).
 CODE=""; transport_ok=1

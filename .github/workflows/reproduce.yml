@@ -153,8 +153,10 @@ jobs:
             using {{SC}}/{{NAV_CAT}}/{{TAX}}/{{CURRENCY}} placeholders for install-specific
             ids. For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
             (referenced by script_path) — it must assert the HEALTHY behaviour and use
-            relative paths (baseURL is injected). Emit only those file(s) — no prose, no
-            markdown fence. Do not comment or label.
+            relative paths (baseURL is injected). Include `scenario` in analysis.json: a
+            plain-English, numbered Given/When/Then list of the repro steps. Comment EVERY
+            step of the generated script (curl or spec) explaining what it does and what it
+            asserts. Emit only those file(s) — no prose, no markdown fence. Do not comment or label.
           # Pin Sonnet: Analyze is a bounded read-issue+test -> emit-JSON task. The
           # action otherwise defaults to Opus (~$1.5/run). Matches triage's engine pin.
           claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
@@ -170,6 +172,7 @@ jobs:
           jq -n --argjson issue "$ISSUE" '{
             schema_version: "1", issue: $issue, layer: "store-api", executor: "http",
             version: "6.6.10.0",
+            scenario: ["Given a running shop", "When POST /store-api/checkout/cart with an empty body", "Then a healthy shop returns HTTP 400"],
             build_profile: { admin_build: false, storefront_build: false, theme_build: false },
             fixtures: { demodata: false, sync_payload_path: "fixtures.json" },
             request: { method: "POST", path: "/store-api/checkout/cart", headers: { "Content-Type": "application/json" }, body: "{}" },
@@ -311,8 +314,10 @@ jobs:
           name: repro-${{ steps.plan.outputs.role }}
           path: |
             result.json
+            repro.sh
+            repro.spec.ts
             test-results/
-          if-no-files-found: ignore # test-results/ exists only for playwright legs
+          if-no-files-found: ignore # the runnable script (repro.sh|repro.spec.ts) + test-results/ vary by executor
           retention-days: 7
 
   # --------------------------------------------------------------------------
@@ -463,6 +468,12 @@ jobs:
             echo
             echo "Layer \`${LAYER}\` · reported: \`${REP}\` · trunk: \`${TRU}\`"
             echo
+            # Scenario (human-readable intent) before the per-leg scripts.
+            if jq -e '.scenario | arrays and length > 0' artifacts/analysis/analysis.json >/dev/null 2>&1; then
+              echo "**Scenario**"
+              jq -r '.scenario[] | "1. " + .' artifacts/analysis/analysis.json
+              echo
+            fi
             if [ "$VERDICT" = "fixed_on_trunk" ] && [ -n "$FIX" ]; then
               echo "**Likely fix (backport candidate):** ${FIX}"
             fi
