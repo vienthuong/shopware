@@ -146,9 +146,12 @@ jobs:
             Run the `reproduce` skill's Analyze phase for issue #${{ needs.gate.outputs.issue }}
             in this shopware/shopware checkout. Read the issue, find the linked fix PR's
             regression test and the relevant DAL schema, derive the cheapest faithful plan,
-            and write ONLY the analysis.json object (per
+            and write the analysis.json object (per
             .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
-            workspace root. No prose, no markdown fence. Do not comment or label.
+            workspace root. If the repro needs seeded entities, ALSO write the admin
+            sync payload to `fixtures.json` (the path in fixtures.sync_payload_path),
+            using {{SC}}/{{NAV_CAT}}/{{TAX}}/{{CURRENCY}} placeholders for install-specific
+            ids. Emit only those file(s) — no prose, no markdown fence. Do not comment or label.
           # Pin Sonnet: Analyze is a bounded read-issue+test -> emit-JSON task. The
           # action otherwise defaults to Opus (~$1.5/run). Matches triage's engine pin.
           claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
@@ -191,7 +194,10 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: analysis
-          path: analysis.json
+          path: |
+            analysis.json
+            fixtures.json
+          if-no-files-found: ignore # fixtures.json is optional (only when the repro seeds data)
           retention-days: 7
 
   # --------------------------------------------------------------------------
@@ -244,6 +250,14 @@ jobs:
           version: ${{ steps.plan.outputs.version }}
           admin-build: ${{ steps.plan.outputs.admin_build }}
           storefront-build: ${{ steps.plan.outputs.storefront_build }}
+
+      # Seed exactly the entities the plan needs (admin sync, demodata:false).
+      # No-ops when the plan ships no fixtures.json. Runs once per leg, before the executor.
+      - name: Seed fixtures
+        if: steps.provision.outcome == 'success'
+        env:
+          APP_URL: ${{ steps.provision.outputs.app_url }}
+        run: PAYLOAD=fixtures.json bash .github/actions/repro/bin/seed.sh
 
       - name: Run executor
         env:
