@@ -193,7 +193,11 @@ jobs:
             NOT a full code tour), then WRITE the output file(s) immediately as your top
             priority. If still uncertain after a handful of tool calls, emit a best-effort
             plan with a lower `confidence` rather than exploring further. For a playwright
-            layer, write a SIMPLE spec — do not perfect the selectors.
+            layer, write the spec straight FROM THE ISSUE'S STEPS using resilient
+            role/text locators (getByRole / getByText / getByLabel) — do NOT read
+            storefront templates/JS to hunt exact selectors. A simple, imperfect spec is
+            fine (the trace shows what happened); emit it immediately. Treat this as a hard
+            budget: do not exceed ~15 tool calls before writing the file(s).
             Write the analysis.json object (per
             .claude/skills/reproduce/references/SCHEMA.md) to `analysis.json` in the
             workspace root. If the repro needs seeded entities, ALSO write the admin
