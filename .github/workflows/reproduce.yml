@@ -255,8 +255,10 @@ jobs:
           echo "storefront_build=$(jq -r .build_profile.storefront_build analysis.json)" >> "$GITHUB_OUTPUT"
 
       # Provision only when an executor needs a live shop (http/playwright). Build only the surface.
+      # continue-on-error: a dead env blocks THIS leg, it must not kill the run (the other leg + report still go).
       - id: provision
         if: steps.plan.outputs.executor == 'http' || steps.plan.outputs.executor == 'playwright'
+        continue-on-error: true
         uses: ./.github/actions/repro/provision
         with:
           version: ${{ steps.plan.outputs.version }}
@@ -266,24 +268,44 @@ jobs:
       # Seed exactly the entities the plan needs (admin sync, demodata:false).
       # No-ops when the plan ships no fixtures.json. Runs once per leg, before the executor.
       - name: Seed fixtures
+        id: seed
         if: steps.provision.outcome == 'success'
+        continue-on-error: true
         env:
           APP_URL: ${{ steps.provision.outputs.app_url }}
         run: PAYLOAD=fixtures.json bash .github/actions/repro/bin/seed.sh
 
       # Playwright legs need node + the browser (gated; http/direct skip this cost).
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        if: steps.plan.outputs.executor == 'playwright'
+        if: steps.plan.outputs.executor == 'playwright' && steps.provision.outcome == 'success' && steps.seed.outcome == 'success'
         with:
           node-version: 22
       - name: Install Playwright
-        if: steps.plan.outputs.executor == 'playwright'
+        if: steps.plan.outputs.executor == 'playwright' && steps.provision.outcome == 'success' && steps.seed.outcome == 'success'
         run: |
           npm init -y >/dev/null
           npm i -D @playwright/test
           npx playwright install --with-deps chromium
 
+      # Dead env (provision or seed failed) → emit a blocked result for this leg, skip the executor.
+      - name: Mark leg blocked
+        if: steps.provision.outcome == 'failure' || steps.seed.outcome == 'failure'
+        env:
+          TARGET: ${{ steps.plan.outputs.role }}
+        run: |
+          set -euo pipefail
+          FAILED=provision; [ "${{ steps.seed.outcome }}" = "failure" ] && FAILED=seed
+          jq -n --argjson issue "$(jq -r .issue analysis.json)" --arg target "$TARGET" \
+            --arg version "$(jq -r .version analysis.json)" --arg executor "$(jq -r .executor analysis.json)" --arg failed "$FAILED" '{
+              schema_version:"1", issue:$issue, target:$target, version:$version, executor:$executor,
+              status:"blocked", assertion:{expect:null,actual:null,matched:null}, duration_s:0,
+              evidence:{script:"", script_lang:"sh", reporter_output:($failed+" failed for this leg"),
+                http:[], artifacts:[], truncated:false},
+              blocked_reason:($failed+" step failed (dead env)") }' > result.json
+          cat result.json
+
       - name: Run executor
+        if: steps.provision.outcome != 'failure' && steps.seed.outcome != 'failure'
         env:
           TARGET: ${{ steps.plan.outputs.role }}
           EXECUTOR: ${{ steps.plan.outputs.executor }}
