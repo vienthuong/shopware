@@ -91,11 +91,16 @@ for i in $(seq 0 $((NREQ - 1))); do
   [ -n "$CTX" ] && CURL+=(-H "sw-context-token: $CTX")
   DISP_H=""; [ -n "$ACCESS_KEY" ] && DISP_H=" -H \"sw-access-key: [REDACTED_KEY]\""
   # plan headers (resolved); drop any sw-access-key the agent added (the executor injects it).
+  has_ct=0
   while IFS= read -r h; do
     [ -n "$h" ] || continue
     case "$h" in sw-access-key:*) continue;; esac
+    case "$(printf '%s' "$h" | tr 'A-Z' 'a-z')" in content-type:*) has_ct=1;; esac
     h=$(resolve "$h"); CURL+=(-H "$h"); DISP_H+=" -H \"$h\""
   done < <(echo "$R" | jq -r '.headers // {} | to_entries[] | "\(.key): \(.value)"')
+  # store-api/admin-api are JSON: default Content-Type when a body is present and the plan
+  # omitted it — otherwise curl sends form-encoded and every field reads as blank (400).
+  if [ -n "$B" ] && [ "$has_ct" = 0 ]; then CURL+=(-H "Content-Type: application/json"); DISP_H+=" -H \"Content-Type: application/json\""; fi
   DISP_B=""; [ -n "$B" ] && { CURL+=(--data "$B"); DISP_B=" --data '$B'"; }
   SCRIPT="${SCRIPT}curl -sS -X $M \"\$APP_URL$P\"${DISP_H}${DISP_B}"$'\n'
 
@@ -104,7 +109,7 @@ for i in $(seq 0 $((NREQ - 1))); do
   [ -n "$T" ] && CTX="$T"
   # a non-final SETUP request must succeed, else the repro can't proceed
   if [ "$i" -lt $((NREQ - 1)) ] && ! [[ "$CODE" =~ ^2 ]]; then
-    blocked="setup request $((i + 1)) ($M $P) returned HTTP $CODE — $(head -c 400 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"; break
+    blocked="setup request $((i + 1)) ($M $P) returned HTTP $CODE — $(head -c 1500 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"; break
   fi
 done
 
@@ -123,7 +128,7 @@ else
   # not that the symptom occurred → inconclusive, never a bogus "reproduced".
   if [ "$KIND" = "response_field" ] && { [ "$ACTUAL_RAW" = "<unparseable>" ] || [ "$ACTUAL_RAW" = "null" ]; } && ! [[ "$CODE" =~ ^2 ]]; then
     STATUS="inconclusive"; MATCHED="null"; ACTUAL="\"$ACTUAL_RAW\""
-    REASON_TEXT="final request returned HTTP $CODE, asserted field absent (likely malformed) — body: $(head -c 400 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"
+    REASON_TEXT="final request returned HTTP $CODE, asserted field absent (likely malformed) — body: $(head -c 1500 "$BODYF" 2>/dev/null | tr -d '\r\n' | tr -s ' ')"
   elif [ "$ACTUAL_RAW" = "$EXPECT" ]; then
     STATUS="not_reproduced"; MATCHED="true"; ACTUAL="\"$ACTUAL_RAW\""
   else
