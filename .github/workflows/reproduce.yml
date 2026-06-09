@@ -151,15 +151,20 @@ jobs:
             workspace root. If the repro needs seeded entities, ALSO write the admin
             sync payload to `fixtures.json` (the path in fixtures.sync_payload_path),
             using {{SC}}/{{NAV_CAT}}/{{TAX}}/{{CURRENCY}} placeholders for install-specific
-            ids. For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
+            ids. Every entity id you mint MUST be a 32-char lowercase-hex Shopware UUID
+            (e.g. 0192f3c4a5b67890abcdef0123456789) — never a human-readable string like
+            "repro-1" (the sync API rejects non-UUIDs). For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
             (referenced by script_path) — it must assert the HEALTHY behaviour and use
             relative paths (baseURL is injected). Include `scenario` in analysis.json: a
             plain-English, numbered Given/When/Then list of the repro steps. Comment EVERY
             step of the generated script (curl or spec) explaining what it does and what it
             asserts. Emit only those file(s) — no prose, no markdown fence. Do not comment or label.
-          # Pin Sonnet: Analyze is a bounded read-issue+test -> emit-JSON task. The
-          # action otherwise defaults to Opus (~$1.5/run). Matches triage's engine pin.
-          claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Write"'
+          # Pin Sonnet (bounded task) + cap turns (bounds cost when the agent can't find
+          # context, e.g. off-repo). Widen the READ-ONLY allowlist so the agent stops
+          # thrashing on denied tools (denials burn turns -> $). Matches triage's pins.
+          claude_args: >-
+            --model claude-sonnet-4-6 --max-turns 15
+            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*)"
 
       # DEMO only: canned plan, reached solely via dry_run=true.
       - name: Analyze (dry-run demo)
@@ -419,7 +424,9 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
           github_token: ${{ github.token }}
-          claude_args: '--model claude-sonnet-4-6 --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(rg:*),Write"'
+          claude_args: >-
+            --model claude-sonnet-4-6 --max-turns 12
+            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(rg:*),Bash(cat:*),Bash(ls:*),Bash(jq:*)"
           prompt: |
             The reproduce pipeline returned verdict "${{ needs.verdict.outputs.verdict }}" for issue
             #${{ needs.gate.outputs.issue }}. Read analysis.json for the reported version and the

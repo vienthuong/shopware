@@ -69,6 +69,10 @@ Rules:
 - `fixtures.sync_payload_path` seeds exactly the entities the bug needs via the admin
   sync API with `demodata: false`. Entity and field names come from the DAL schema,
   never from probing the API.
+- `fixtures.sync_payload` entity ids MUST be 32-char lowercase-hex Shopware UUIDs
+  (e.g. `0192f3c4a5b67890abcdef0123456789`) — the admin sync API rejects non-UUID
+  strings (`FRAMEWORK__WRITE_CONSTRAINT_VIOLATION`). Use `{{SC}}/{{NAV_CAT}}/{{TAX}}/
+  {{CURRENCY}}` placeholders for install-specific ids; `seed.sh` resolves them.
 - `request` is required for the `http` executor — the cheapest faithful call that
   triggers the symptom. `assertion.field` is a jq path used only by `response_field`;
   `assertion.locator` is a human reference to the endpoint/UI element.
