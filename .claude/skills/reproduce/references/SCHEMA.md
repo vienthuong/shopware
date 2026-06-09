@@ -74,8 +74,15 @@ Rules:
   (e.g. `0192f3c4a5b67890abcdef0123456789`) — the admin sync API rejects non-UUID
   strings (`FRAMEWORK__WRITE_CONSTRAINT_VIOLATION`). Use `{{SC}}/{{NAV_CAT}}/{{TAX}}/
   {{CURRENCY}}` placeholders for install-specific ids; `seed.sh` resolves them.
-- `request` is required for the `http` executor — the cheapest faithful call that
-  triggers the symptom. `assertion.field` is a jq path used only by `response_field`;
+- `request` (single object) OR `requests` (array, for a multi-step flow) is required for
+  the `http` executor; the assertion runs on the FINAL response. The executor injects
+  `sw-access-key` and captures/carries `sw-context-token` across the sequence — do NOT put
+  those in the plan. Reference install-specific ids via placeholders the executor resolves
+  against the shop: `{{SC}} {{NAV_CAT}} {{COUNTRY}} {{SALUTATION}} {{SALUTATION2}} {{TAX}}
+  {{CURRENCY}} {{LANGUAGE}} {{STOREFRONT_URL}}` (also valid in `assertion.expect`). Entities
+  you create yourself go in `fixtures.json` with known hex UUIDs. A non-2xx non-final
+  request → `blocked`; a missing field on a non-2xx final response → `inconclusive` (never
+  a bogus `reproduced`). `assertion.field` is a jq path used only by `response_field`;
   `assertion.locator` is a human reference to the endpoint/UI element.
 - `script_path` is required for the `playwright` executor — the generated spec
   (`repro.spec.ts`) that asserts the HEALTHY behaviour, generated ONCE by Analyze and

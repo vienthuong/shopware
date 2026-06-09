@@ -1,117 +1,147 @@
 #!/usr/bin/env bash
-# Real `http` executor for the reproduce pipeline.
+# `http` executor (v2). Reads the plan (analysis.json), runs the request — or a
+# request SEQUENCE — against the running shop, and asserts on the FINAL response.
 #
-# Reads the repro plan (analysis.json), issues the request it describes against a
-# running Shopware (APP_URL), evaluates the assertion, and writes result.json per
-# .claude/skills/reproduce/references/SCHEMA.md. No browser, no asset build — the
-# cheapest faithful surface for store-api / admin-api bugs. HAR-style evidence.
+# Supports:
+#  - install-specific placeholders in path/body/headers, resolved against the shop:
+#    {{SC}} {{NAV_CAT}} {{COUNTRY}} {{SALUTATION}} {{SALUTATION2}} {{TAX}} {{CURRENCY}}
+#    {{LANGUAGE}} {{STOREFRONT_URL}} {{SW_ACCESS_KEY}} {{SW_CONTEXT_TOKEN}}
+#  - multi-step: `requests: [...]`; sw-context-token is captured and carried forward;
+#    a non-final setup request that isn't 2xx => blocked.
+#  - false-positive guard: an unparseable/empty response_field on a non-2xx response
+#    => inconclusive (NOT a bogus "reproduced").
 #
-# Env:
-#   ANALYSIS      path to analysis.json            (default: analysis.json)
-#   OUT           path to write result.json        (default: result.json)
-#   APP_URL       base URL of the running shop, e.g. http://localhost:8000  (required)
-#   SW_ACCESS_KEY store-api sales-channel access key (optional; store-api layer)
-#   TARGET        reported | trunk                 (required)
+# expect = HEALTHY value: actual != expect => reproduced; actual == expect => not_reproduced.
+#
+# Env: ANALYSIS, OUT, APP_URL (req), TARGET (req), SW_ACCESS_KEY, ADMIN_USER, ADMIN_PASS
 set -euo pipefail
 
 ANALYSIS=${ANALYSIS:-analysis.json}
 OUT=${OUT:-result.json}
 : "${APP_URL:?APP_URL is required}"
 : "${TARGET:?TARGET is required}"
+BASE=${APP_URL%/}
 ACCESS_KEY=${SW_ACCESS_KEY:-}
+ADMIN_USER=${ADMIN_USER:-admin}
+ADMIN_PASS=${ADMIN_PASS:-shopware}
 
 VERSION=$(jq -r '.version // "unknown"' "$ANALYSIS")
-METHOD=$(jq -r '.request.method // "GET"' "$ANALYSIS")
-REQ_PATH=$(jq -r '.request.path // .assertion.locator' "$ANALYSIS")
-BODY=$(jq -r '.request.body // ""' "$ANALYSIS")
 KIND=$(jq -r '.assertion.kind' "$ANALYSIS")
 EXPECT=$(jq -r '.assertion.expect | tostring' "$ANALYSIS")
 FIELD=$(jq -r '.assertion.field // ""' "$ANALYSIS")
+# A single `request` is treated as a one-element sequence.
+REQS=$(jq -c 'if .requests then .requests else [.request] end' "$ANALYSIS")
+NREQ=$(echo "$REQS" | jq 'length')
 
-BASE=${APP_URL%/}
-URL="$BASE$REQ_PATH"
-HEAD=$(mktemp); BODYFILE=$(mktemp)
-trap 'rm -f "$HEAD" "$BODYFILE"' EXIT
+# Plain vars (no associative array → portable to bash 3.2 + the CI's bash 5).
+SW_ACCESS_KEY_V="$ACCESS_KEY"; STOREFRONT_URL="$BASE"
+SC=""; NAV_CAT=""; COUNTRY=""; SALUTATION=""; SALUTATION2=""; TAX=""; CURRENCY=""; LANGUAGE=""
 
-# Build the request. Header order: access key, then plan headers.
-CURL=(curl -sS --max-time 30 -o "$BODYFILE" -D "$HEAD" -w '%{http_code}' -X "$METHOD" "$URL")
-DISPLAY_H=""
-if [ -n "$ACCESS_KEY" ]; then
-  CURL+=(-H "sw-access-key: $ACCESS_KEY")
-  DISPLAY_H+=" -H \"sw-access-key: [REDACTED_KEY]\""
-fi
-while IFS= read -r h; do
-  [ -n "$h" ] || continue
-  CURL+=(-H "$h")
-  DISPLAY_H+=" -H \"$h\""
-done < <(jq -r '.request.headers // {} | to_entries[] | "\(.key): \(.value)"' "$ANALYSIS")
-if [ -n "$BODY" ]; then
-  CURL+=(--data "$BODY")
-  DISPLAY_BODY=" --data '$BODY'"
-else
-  DISPLAY_BODY=""
-fi
-# Verbatim, reproducible, redacted: literal $APP_URL (no host leak), redacted key.
-SCRIPT="curl -sS -X $METHOD \"\$APP_URL$REQ_PATH\"$DISPLAY_H$DISPLAY_BODY"
-# Also drop the runnable script as a file in the leg bundle (for the artifact).
-{ echo '#!/usr/bin/env bash'; echo '# Reproduction request — set $APP_URL (and SW_ACCESS_KEY for store-api).'; echo "$SCRIPT"; } > repro.sh
-
-# One bounded retry on transport failure, then `blocked` (dead env — don't grind).
-CODE=""; transport_ok=1
-if ! CODE=$("${CURL[@]}" 2>/dev/null); then
-  sleep 3
-  CODE=$("${CURL[@]}" 2>/dev/null) || transport_ok=0
+# Resolve install-specific ids only if the plan references {{...}} beyond the free ones (admin API).
+NEED=$(echo "$REQS" | grep -oE '\{\{[A-Z0-9_]+\}\}' | sort -u | tr -d '{}' || true)
+if echo "$NEED" | grep -qvE '^(SW_ACCESS_KEY|STOREFRONT_URL|SW_CONTEXT_TOKEN)?$'; then
+  TOKEN=$(curl -sS --max-time 30 -X POST "$BASE/api/oauth/token" -H 'Content-Type: application/json' \
+    -d "{\"grant_type\":\"password\",\"client_id\":\"administration\",\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\",\"scopes\":\"write\"}" \
+    | jq -r '.access_token // empty')
+  [ -n "$TOKEN" ] || { echo "::error::admin token failed (needed to resolve request ids)"; exit 1; }
+  A=(-H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json')
+  q() { curl -sS --max-time 30 -X POST "$BASE/api/search/$1" "${A[@]}" -d "$2"; }
+  SCJ=$(q sales-channel '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}')
+  SC=$(echo "$SCJ" | jq -r '.data[0].id // empty')
+  NAV_CAT=$(echo "$SCJ" | jq -r '.data[0].navigationCategoryId // empty')
+  COUNTRY=$(q country '{"limit":1,"filter":[{"type":"equals","field":"active","value":true}]}' | jq -r '.data[0].id // empty')
+  SALS=$(q salutation '{"limit":2}')
+  SALUTATION=$(echo "$SALS" | jq -r '.data[0].id // empty')
+  SALUTATION2=$(echo "$SALS" | jq -r '.data[1].id // .data[0].id // empty')
+  TAX=$(q tax '{"limit":1}' | jq -r '.data[0].id // empty')
+  CURRENCY=$(q currency '{"limit":1,"filter":[{"type":"equals","field":"isoCode","value":"EUR"}]}' | jq -r '.data[0].id // empty')
+  LANGUAGE=$(q language '{"limit":1}' | jq -r '.data[0].id // empty')
 fi
 
-if [ "$transport_ok" = 0 ]; then
-  STATUS="blocked"; MATCHED="null"; ACTUAL="null"; REASON="\"endpoint unreachable after one retry: $METHOD $REQ_PATH\""
-  REPORTER="transport failure (env not READY)"
+CTX=""                       # sw-context-token, carried across the sequence
+HEAD=$(mktemp); BODYF=$(mktemp); trap 'rm -f "$HEAD" "$BODYF"' EXIT
+SCRIPT=""; CODE=""; blocked=""
+
+resolve() { # substitute {{KEY}} placeholders (SALUTATION2 before SALUTATION)
+  local s="$1"
+  s="${s//\{\{SW_ACCESS_KEY\}\}/$SW_ACCESS_KEY_V}"
+  s="${s//\{\{STOREFRONT_URL\}\}/$STOREFRONT_URL}"
+  s="${s//\{\{SC\}\}/$SC}"
+  s="${s//\{\{NAV_CAT\}\}/$NAV_CAT}"
+  s="${s//\{\{COUNTRY\}\}/$COUNTRY}"
+  s="${s//\{\{SALUTATION2\}\}/$SALUTATION2}"
+  s="${s//\{\{SALUTATION\}\}/$SALUTATION}"
+  s="${s//\{\{TAX\}\}/$TAX}"
+  s="${s//\{\{CURRENCY\}\}/$CURRENCY}"
+  s="${s//\{\{LANGUAGE\}\}/$LANGUAGE}"
+  s="${s//\{\{SW_CONTEXT_TOKEN\}\}/$CTX}"
+  printf '%s' "$s"
+}
+
+# assertion.expect may itself reference a resolved id (e.g. {{SALUTATION2}}).
+EXPECT=$(resolve "$EXPECT")
+
+for i in $(seq 0 $((NREQ - 1))); do
+  R=$(echo "$REQS" | jq -c ".[$i]")
+  M=$(echo "$R" | jq -r '.method // "GET"')
+  P=$(resolve "$(echo "$R" | jq -r '.path // ""')")
+  B=$(resolve "$(echo "$R" | jq -r '.body // ""')")
+  CURL=(curl -sS --max-time 30 -o "$BODYF" -D "$HEAD" -w '%{http_code}' -X "$M" "$BASE$P")
+  [ -n "$ACCESS_KEY" ] && CURL+=(-H "sw-access-key: $ACCESS_KEY")
+  [ -n "$CTX" ] && CURL+=(-H "sw-context-token: $CTX")
+  DISP_H=""; [ -n "$ACCESS_KEY" ] && DISP_H=" -H \"sw-access-key: [REDACTED_KEY]\""
+  # plan headers (resolved); drop any sw-access-key the agent added (the executor injects it).
+  while IFS= read -r h; do
+    [ -n "$h" ] || continue
+    case "$h" in sw-access-key:*) continue;; esac
+    h=$(resolve "$h"); CURL+=(-H "$h"); DISP_H+=" -H \"$h\""
+  done < <(echo "$R" | jq -r '.headers // {} | to_entries[] | "\(.key): \(.value)"')
+  DISP_B=""; [ -n "$B" ] && { CURL+=(--data "$B"); DISP_B=" --data '$B'"; }
+  SCRIPT="${SCRIPT}curl -sS -X $M \"\$APP_URL$P\"${DISP_H}${DISP_B}"$'\n'
+
+  if ! CODE=$("${CURL[@]}" 2>/dev/null); then blocked="request $((i + 1)) ($M $P) — transport failure"; break; fi
+  T=$(grep -i '^sw-context-token:' "$HEAD" 2>/dev/null | tail -1 | tr -d '\r' | sed 's/^[^:]*:[[:space:]]*//' || true)
+  [ -n "$T" ] && CTX="$T"
+  # a non-final SETUP request must succeed, else the repro can't proceed
+  if [ "$i" -lt $((NREQ - 1)) ] && ! [[ "$CODE" =~ ^2 ]]; then blocked="setup request $((i + 1)) ($M $P) returned HTTP $CODE"; break; fi
+done
+
+if [ -n "$blocked" ]; then
+  STATUS="blocked"; MATCHED="null"; ACTUAL="null"; REASON="\"$blocked\""; REPORTER="$blocked"
 else
   REASON="null"
   case "$KIND" in
-    http_status)
-      ACTUAL_RAW="$CODE"
-      REPORTER="HTTP $CODE (expected $EXPECT)" ;;
+    http_status) ACTUAL_RAW="$CODE"; REPORTER="HTTP $CODE (expected $EXPECT)" ;;
     response_field)
-      ACTUAL_RAW=$(jq -r "$FIELD" "$BODYFILE" 2>/dev/null || echo "<unparseable>")
-      REPORTER="$FIELD = '$ACTUAL_RAW' (expected '$EXPECT')" ;;
-    *)
-      ACTUAL_RAW="$CODE"
-      REPORTER="HTTP $CODE (unknown assertion kind '$KIND')" ;;
+      ACTUAL_RAW=$(jq -r "$FIELD" "$BODYF" 2>/dev/null || true); [ -n "$ACTUAL_RAW" ] || ACTUAL_RAW="<unparseable>"
+      REPORTER="$FIELD = '$ACTUAL_RAW' (expected '$EXPECT'); HTTP $CODE" ;;
+    *) ACTUAL_RAW="$CODE"; REPORTER="HTTP $CODE (unknown assertion kind '$KIND')" ;;
   esac
-  # assertion.expect is the HEALTHY value (derived from the fix PR's regression test).
-  # symptom observed (assertion fails) => reproduced; healthy (assertion holds) => not_reproduced.
-  if [ "$ACTUAL_RAW" = "$EXPECT" ]; then
-    MATCHED="true"; STATUS="not_reproduced"
+  # Guard: a missing field on a non-2xx response means the call was malformed/failed,
+  # not that the symptom occurred → inconclusive, never a bogus "reproduced".
+  if [ "$KIND" = "response_field" ] && { [ "$ACTUAL_RAW" = "<unparseable>" ] || [ "$ACTUAL_RAW" = "null" ]; } && ! [[ "$CODE" =~ ^2 ]]; then
+    STATUS="inconclusive"; MATCHED="null"; ACTUAL="\"$ACTUAL_RAW\""; REASON="\"final request returned HTTP $CODE and the asserted field is absent — request likely malformed\""
+  elif [ "$ACTUAL_RAW" = "$EXPECT" ]; then
+    STATUS="not_reproduced"; MATCHED="true"; ACTUAL="\"$ACTUAL_RAW\""
   else
-    MATCHED="false"; STATUS="reproduced"
+    STATUS="reproduced"; MATCHED="false"; ACTUAL="\"$ACTUAL_RAW\""
   fi
-  ACTUAL="\"$ACTUAL_RAW\""
 fi
+
+{ echo '#!/usr/bin/env bash'; echo '# Reproduction request(s) — set $APP_URL (executor injects sw-access-key / sw-context-token).'; printf '%s' "$SCRIPT"; } > repro.sh
 
 jq -n \
   --argjson issue "$(jq -r '.issue' "$ANALYSIS")" \
   --arg target "$TARGET" --arg version "$VERSION" --arg status "$STATUS" \
   --arg expect "$EXPECT" --argjson actual "$ACTUAL" --argjson matched "$MATCHED" \
-  --arg script "$SCRIPT" --arg reporter "$REPORTER" \
-  --arg method "$METHOD" --arg path "$REQ_PATH" --argjson code "${CODE:-0}" \
+  --arg script "$SCRIPT" --arg reporter "$REPORTER" --argjson code "${CODE:-0}" \
   --argjson reason "$REASON" '{
-    schema_version: "1",
-    issue: $issue,
-    target: $target,
-    version: $version,
-    executor: "http",
+    schema_version: "1", issue: $issue, target: $target, version: $version, executor: "http",
     status: $status,
     assertion: { expect: $expect, actual: ($actual | if . == null then null else tostring end), matched: $matched },
     duration_s: 0,
-    evidence: {
-      script: $script,
-      script_lang: "sh",
-      reporter_output: $reporter,
-      http: [{ method: $method, path: $path, status: $code }],
-      artifacts: [],
-      truncated: false
-    },
+    evidence: { script: $script, script_lang: "sh", reporter_output: $reporter,
+      http: [{ status: $code }], artifacts: [], truncated: false },
     blocked_reason: $reason
   }' > "$OUT"
 

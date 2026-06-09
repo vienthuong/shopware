@@ -172,7 +172,11 @@ jobs:
             using {{SC}}/{{NAV_CAT}}/{{TAX}}/{{CURRENCY}} placeholders for install-specific
             ids. Every entity id you mint MUST be a 32-char lowercase-hex Shopware UUID
             (e.g. 0192f3c4a5b67890abcdef0123456789) — never a human-readable string like
-            "repro-1" (the sync API rejects non-UUIDs). For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
+            "repro-1" (the sync API rejects non-UUIDs). For http, use `request` or
+            `requests` (a multi-step array; the executor carries sw-context-token and
+            injects sw-access-key — never add those); reference PRE-EXISTING install ids via
+            {{SC}}/{{COUNTRY}}/{{SALUTATION}}/{{SALUTATION2}}/{{STOREFRONT_URL}} placeholders
+            the executor resolves. For a `playwright` (UI) layer, ALSO generate the test as `repro.spec.ts`
             (referenced by script_path) — it must assert the HEALTHY behaviour and use
             relative paths (baseURL is injected). Include `scenario` in analysis.json: a
             plain-English, numbered Given/When/Then list of the repro steps. Comment EVERY
