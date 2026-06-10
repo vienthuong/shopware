@@ -4,10 +4,16 @@ name: Reproduce Issue
 #
 #   gate ─▶ analyze ─▶ reproduce (matrix: reported ‖ trunk, parallel) ─▶ report
 #
-# Status: analyze = real claude-code-action agent (explicit dry_run demo / hard-fail
-# if no key); reproduce = real provision + executor for all three layers
+# Status: analyze = real Copilot CLI agent (explicit dry_run demo / hard-fail
+# if no Copilot token); reproduce = real provision + executor for all three layers
 # (http / playwright / direct). All JSON conforms to
 # .claude/skills/reproduce/references/SCHEMA.md.
+#
+# Secrets: the Analyze and Attribute agents run via GitHub Copilot CLI (.github/
+# actions/copilot-agent) and are billed to a Copilot plan (premium requests), NOT a
+# metered Anthropic key. Set the `COPILOT_CLI_TOKEN` secret to a fine-grained PAT
+# with the "Copilot Requests" permission (classic ghp_ tokens are not supported).
+# Without it, real runs fail loud; use dry_run=true for a $0 canned-plan demo.
 
 on:
   issues:
@@ -31,7 +37,7 @@ on:
         default: false
         type: boolean
       dry_run:
-        description: "DEMO: skip the Analyze agent and emit a canned plan (smoke-test the wiring without an API key, $0)"
+        description: "DEMO: skip the Analyze agent and emit a canned plan (smoke-test the wiring without a Copilot token, $0)"
         required: false
         default: false
         type: boolean
@@ -46,10 +52,10 @@ on:
         required: false
         default: "trunk"
         type: string
-      max_turns:
-        description: "Cap on the Analyze agent's turns (cost control; default 35)"
+      model:
+        description: "Model the Analyze/Attribute agents pin via Copilot CLI (must be enabled for your Copilot plan)"
         required: false
-        default: "35"
+        default: "claude-sonnet-4.5"
         type: string
 
 concurrency:
@@ -156,8 +162,7 @@ jobs:
     timeout-minutes: 15 # the agent reads the issue + fix-PR test + schema
     permissions:
       contents: read # checkout
-      issues: write # agent reads the issue + posts a clarifying question when info is missing
-      id-token: write # claude-code-action fetches a GitHub token via OIDC
+      issues: write # the matrix step posts a clarifying/low-confidence comment via gh
     outputs:
       targets: ${{ steps.matrix.outputs.targets }}
     steps:
@@ -166,11 +171,11 @@ jobs:
         with:
           persist-credentials: false
 
-      # Decide the mode ONCE. Never silently fabricate: missing key + not dry-run = fail.
+      # Decide the mode ONCE. Never silently fabricate: missing token + not dry-run = fail.
       - id: mode
         env:
           DRY_RUN: ${{ github.event.inputs.dry_run }}
-          HAS_KEY: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY != '' }}
+          HAS_KEY: ${{ secrets.COPILOT_CLI_TOKEN != '' }}
         run: |
           set -euo pipefail
           if [ "$DRY_RUN" = "true" ]; then m=dry_run
@@ -179,11 +184,11 @@ jobs:
           echo "mode=$m" >> "$GITHUB_OUTPUT"
           echo "analyze mode: $m"
 
-      # Production safety: no key and not an explicit demo → fail loud, BEFORE provisioning.
+      # Production safety: no token and not an explicit demo → fail loud, BEFORE provisioning.
       - name: Guard — refuse to fabricate
         if: steps.mode.outputs.mode == 'fail'
         run: |
-          echo "::error::Analyze requires QUALITY_INITIATIVE_ANTHROPIC_API_KEY. Refusing to emit a fabricated plan."
+          echo "::error::Analyze requires the COPILOT_CLI_TOKEN secret (a fine-grained PAT with the 'Copilot Requests' permission). Refusing to emit a fabricated plan."
           echo "::error::Set the secret, or dispatch with dry_run=true for a clearly-labelled demo."
           exit 1
 
@@ -219,34 +224,37 @@ jobs:
       - name: Analyze (agent)
         id: analyze
         if: steps.mode.outputs.mode == 'real'
-        # Hitting --max-turns is a hard error in the action; tolerate it so a
-        # complete analysis.json (written before the cap) still counts. The matrix
-        # step fails cleanly if no analysis.json was produced.
+        # A late non-zero exit is tolerated inside the composite so a complete
+        # analysis.json (written before any error) still counts. continue-on-error
+        # additionally lets a hard failure (e.g. npm install) fall through to the
+        # matrix step, which degrades gracefully when analysis.json is absent.
         continue-on-error: true
-        uses: anthropics/claude-code-action@11ba60486e4aec9ddfeafcf4bb3f00b028ac2c16 # v1.0.142
+        uses: ./.github/actions/copilot-agent
         with:
-          anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
-          # Use the default token so the action skips the Claude GitHub App token
-          # exchange (the App is installed on shopware/shopware, but not everywhere).
-          github_token: ${{ github.token }}
+          # Authenticate Copilot CLI with the Copilot-plan token (NOT github.token —
+          # the default Actions token has no 'Copilot Requests' entitlement). No
+          # github-token is passed: the agent works from the prefetched issue.md /
+          # fixpr.diff on disk, which also tightens the prompt-injection posture.
+          copilot-token: ${{ secrets.COPILOT_CLI_TOKEN }}
+          model: ${{ github.event.inputs.model || 'claude-sonnet-4.5' }}
           prompt: |
             Run the `reproduce` skill's Analyze phase for issue
             #${{ needs.gate.outputs.issue }} in repository ${{ github.repository }}.
             The issue (title, body AND comments) is ALREADY fetched to `./issue.md`, and if
             a linked fix PR was found, its description + diff (with the regression test) is
             in `./fixpr.diff` — READ THOSE FIRST and do not re-fetch/search when they suffice
-            (saves turns). Follow any OTHER linked issue/PR only if these are insufficient
-            (use `--repo shopware/shopware`). The working directory is a shopware checkout —
-            read it for code/DAL schema only as needed. If the issue is too vague,
+            (saves work). Follow any OTHER linked issue/PR only if these are insufficient.
+            The working directory is a shopware checkout — read it for code/DAL schema only
+            as needed. If the issue is too vague,
             contradictory, or missing essentials to derive a FAITHFUL plan, do NOT guess —
             write analysis.json as {"schema_version":"1","issue":N,"needs_info":"<one
             specific clarifying question>"} and stop (the pipeline will ask and abort).
-            Otherwise derive the cheapest faithful plan. BE ECONOMICAL — you have a limited turn
-            budget: do the MINIMUM investigation to fill the plan (a few targeted searches,
-            NOT a full code tour). Your VERY FIRST Write MUST be a complete best-effort
-            analysis.json (plus its spec/test file) within the first few tool calls — treat
-            "produce the files" as turn 1, not the finale. Refine them afterwards ONLY if turns
-            remain; NEVER finish (or hit the turn cap) without having written analysis.json. If
+            Otherwise derive the cheapest faithful plan. BE ECONOMICAL: do the MINIMUM
+            investigation to fill the plan (a few targeted searches,
+            NOT a full code tour). Your VERY FIRST write MUST be a complete best-effort
+            analysis.json (plus its spec/test file) early on — treat
+            "produce the files" as the first action, not the finale. Refine them afterwards
+            ONLY if needed; NEVER finish without having written analysis.json. If
             still uncertain after a handful of tool calls, keep the best-effort plan with a
             lower `confidence` rather than exploring further. `confidence` (0..1)
             measures how FAITHFULLY the plan reproduces the reported symptom — NOT whether a
@@ -281,16 +289,10 @@ jobs:
             rejects them). Include `scenario`: a plain-English, numbered Given/When/Then list
             of the repro steps. Comment every step of the generated script. Emit only the
             file(s) — no prose, no markdown fence. Do not comment or label.
-          # Pin Sonnet (bounded task) + cap turns (bounds cost when the agent can't find
-          # context, e.g. off-repo). Widen the READ-ONLY allowlist so the agent stops
-          # thrashing on denied tools (denials burn turns -> $). Matches triage's pins.
-          claude_args: >-
-            --model claude-sonnet-4-6 --max-turns ${{ github.event.inputs.max_turns || '35' }}
-            --allowedTools "Read,Glob,Grep,Write,Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(gh search:*),Bash(gh api:*),Bash(rg:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(cat:*),Bash(ls:*),Bash(find:*),Bash(jq:*),Bash(grep:*),Bash(head:*),Bash(tail:*),Bash(sed:*),Bash(wc:*)"
 
       # DEMO only: canned plan, reached solely via dry_run=true.
       # DEMO: a canned plan per layer so the WHOLE pipeline (provision → executor → verdict
-      # → report) can be smoke-tested for $0 — no agent, no API key. confidence is 1.0 so the
+      # → report) can be smoke-tested for $0 — no agent, no Copilot token. confidence is 1.0 so the
       # < 0.4 bail-out doesn't suppress the run; derived_from + the ::warning:: mark it fake.
       - name: Analyze (dry-run demo)
         if: steps.mode.outputs.mode == 'dry_run'
@@ -338,15 +340,15 @@ jobs:
           esac
           cat analysis.json
 
-      # Capture the agent transcript (tool calls, denials, per-turn breakdown) for cost
-      # analysis. Fork/dev only — gate behind debug before the real shopware PR (tool
-      # outputs can be sensitive on a public repo).
+      # Capture the Copilot CLI session logs (tool calls, reasoning, token usage) for
+      # cost/quality analysis. Fork/dev only — gate behind debug before the real
+      # shopware PR (tool outputs can be sensitive on a public repo).
       - name: Upload agent transcript (debug)
-        if: always() && steps.analyze.outputs.execution_file != ''
+        if: always() && steps.analyze.outputs.log-dir != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: analyze-transcript
-          path: ${{ steps.analyze.outputs.execution_file }}
+          path: ${{ steps.analyze.outputs.log-dir }}
           if-no-files-found: ignore
           retention-days: 7
 
@@ -633,7 +635,7 @@ jobs:
   # --------------------------------------------------------------------------
   # Attribute (AGENT, gated): on a diverging verdict, name the commit that fixed
   # or introduced the symptom. Only runs for regression, or fixed_on_trunk with no
-  # known fix PR. Enrichment only — skips (does not fail) when no API key.
+  # known fix PR. Enrichment only — skips (does not fail) when no Copilot token.
   # --------------------------------------------------------------------------
   attribute:
     needs: [gate, analyze, reproduce, verdict]
@@ -646,7 +648,6 @@ jobs:
     permissions:
       contents: read # full history for the git log range
       issues: read
-      id-token: write
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -657,18 +658,21 @@ jobs:
           name: analysis
       - id: mode
         env:
-          HAS_KEY: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY != '' }}
+          HAS_KEY: ${{ secrets.COPILOT_CLI_TOKEN != '' }}
         run: echo "real=$HAS_KEY" >> "$GITHUB_OUTPUT"
       - name: Attribute (agent)
         if: steps.mode.outputs.real == 'true'
-        continue-on-error: true # enrichment only — a failed attribution must not red the run
-        uses: anthropics/claude-code-action@11ba60486e4aec9ddfeafcf4bb3f00b028ac2c16 # v1.0.142
+        # enrichment only — the composite tolerates a non-zero exit, and
+        # continue-on-error plus the conditional upload below ensure a failed
+        # attribution never reds the run.
+        continue-on-error: true
+        uses: ./.github/actions/copilot-agent
         with:
-          anthropic_api_key: ${{ secrets.QUALITY_INITIATIVE_ANTHROPIC_API_KEY }}
-          github_token: ${{ github.token }}
-          claude_args: >-
-            --model claude-sonnet-4-6 --max-turns 20
-            --allowedTools "Read,Glob,Grep,Write,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(rg:*),Bash(cat:*),Bash(ls:*),Bash(jq:*)"
+          copilot-token: ${{ secrets.COPILOT_CLI_TOKEN }}
+          # The agent needs `gh pr view` to map a commit to its PR; expose the
+          # default Actions token for those read-only GitHub calls.
+          github-token: ${{ github.token }}
+          model: ${{ github.event.inputs.model || 'claude-sonnet-4.5' }}
           prompt: |
             The reproduce pipeline returned verdict "${{ needs.verdict.outputs.verdict }}" for issue
             #${{ needs.gate.outputs.issue }}. Read analysis.json for the reported version and the
@@ -678,9 +682,9 @@ jobs:
             (the one whose diff touches the asserted behaviour). Write ONLY this JSON to
             attribution.json — no prose, no fence:
             {"schema_version":"1","kind":"${{ needs.verdict.outputs.verdict == 'regression' && 'regression' || 'fix' }}","likely_commit":"<sha>","pr":"<#-or-null>","reasoning":"<1-2 sentences>","confidence":0.0}
-      - name: Skipped (no key)
+      - name: Skipped (no token)
         if: steps.mode.outputs.real != 'true'
-        run: echo "::warning::No API key — skipping commit attribution (enrichment only)."
+        run: echo "::warning::No COPILOT_CLI_TOKEN — skipping commit attribution (enrichment only)."
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: hashFiles('attribution.json') != ''
         with:

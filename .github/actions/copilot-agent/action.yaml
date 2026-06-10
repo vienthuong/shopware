@@ -1,0 +1,101 @@
+name: "Copilot CLI agent"
+description: >
+  Run a single agentic prompt through GitHub Copilot CLI (`copilot -p`) and let it
+  read/write files in the workspace. Billed to the caller's GitHub Copilot plan
+  (premium requests) instead of a metered Anthropic API key. The agent writes its
+  output file(s) into the workspace; the caller is responsible for consuming /
+  uploading them. Exit is tolerated (never hard-fails) so a partial-but-valid output
+  file still counts — the caller checks for the file it expects.
+
+inputs:
+  prompt:
+    description: "The full instruction for the agent. Passed verbatim to `copilot -p`."
+    required: true
+  copilot-token:
+    description: >
+      Fine-grained PAT with the "Copilot Requests" permission (or a Copilot CLI /
+      gh OAuth token). Used ONLY to authenticate Copilot CLI. Classic `ghp_` tokens
+      are NOT supported. This is what makes the run bill to a Copilot plan.
+    required: true
+  github-token:
+    description: >
+      Optional token exposed to the agent's shell as GH_TOKEN, so any `gh` calls it
+      makes (e.g. `gh pr view`) are authenticated. Omit to run the agent without
+      GitHub access (preferred when all needed context is already on disk).
+    required: false
+    default: ""
+  model:
+    description: >
+      Model to pin. `claude-sonnet-4.5` is the documented Copilot CLI default; other
+      values (e.g. `claude-sonnet-4`, `gpt-5`, or a newer Sonnet once you confirm its
+      slug) must be enabled for your Copilot plan. Pass `auto` to let Copilot choose.
+    required: false
+    default: "claude-sonnet-4.5"
+  version:
+    description: >
+      Version of the `@github/copilot` npm package to install. Copilot CLI ships very
+      frequently — pin to a tested version for reproducibility instead of `latest`.
+      Must be >= 1.0.43: earlier versions carry known arbitrary-code-execution
+      advisories (dangerous shell expansion <= 0.0.422; nested bare repo <= 1.0.42),
+      which matter here because the agent processes untrusted issue text.
+    required: false
+    default: "1.0.43"
+  log-dir:
+    description: "Directory for Copilot CLI logs (uploadable by the caller for debugging)."
+    required: false
+    default: ""
+  node-version:
+    description: "Node.js version used to install/run Copilot CLI."
+    required: false
+    default: "22"
+
+outputs:
+  log-dir:
+    description: "Resolved log directory containing the Copilot CLI session logs."
+    value: ${{ steps.run.outputs.log_dir }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Run Copilot CLI agent
+      id: run
+      shell: bash
+      env:
+        # Copilot CLI checks COPILOT_GITHUB_TOKEN, then GH_TOKEN, then GITHUB_TOKEN.
+        # Use the highest-precedence one for auth so it can't be shadowed by a
+        # GH_TOKEN we set purely for the agent's own `gh` calls.
+        COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-token }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PROMPT: ${{ inputs.prompt }}
+        MODEL: ${{ inputs.model }}
+        VERSION: ${{ inputs.version }}
+        LOG_DIR: ${{ inputs.log-dir || format('{0}/copilot-logs', runner.temp) }}
+      run: |
+        set -uo pipefail
+        npm install -g "@github/copilot@${VERSION}"
+        mkdir -p "$LOG_DIR"
+        echo "log_dir=$LOG_DIR" >> "$GITHUB_OUTPUT"
+
+        # Programmatic, non-interactive run:
+        #   -p                  one-shot prompt, exits when done (1 premium request).
+        #   --allow-all-tools   required for unattended use (no approval prompts).
+        #   --allow-all-paths   read/write the checkout + write the output file freely.
+        #   --disable-builtin-mcps  drop the built-in GitHub MCP server: the agent works
+        #                       from on-disk context + (optional) `gh`, and CANNOT be
+        #                       steered by injected issue text into commenting/merging.
+        #   --no-ask-user       never block waiting for interactive input.
+        # Tolerate a non-zero exit: a complete output file written before any late
+        # error still counts; the caller fails cleanly if the file is absent.
+        copilot -p "$PROMPT" \
+          --allow-all-tools \
+          --allow-all-paths \
+          --disable-builtin-mcps \
+          --no-ask-user \
+          --model "$MODEL" \
+          --log-dir "$LOG_DIR" \
+          --log-level default \
+          --no-color || echo "::warning::Copilot CLI exited non-zero — caller will check for the expected output file."
