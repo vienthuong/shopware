@@ -669,6 +669,48 @@ jobs:
           set -euo pipefail
           LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
           ATTR="artifacts/attribution/attribution.json"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RF="artifacts/repro-reported/result.json"; TF="artifacts/repro-trunk/result.json"
+          have_r=0; [ -f "$RF" ] && have_r=1
+          have_t=0; [ -f "$TF" ] && have_t=1
+          # The generated script is identical across legs for direct/playwright (authored
+          # ONCE and reused) and usually for http; only http can vary (per-leg resolved
+          # ids/tokens). Decide once whether to show it a single time or per-leg, so we don't
+          # list two copies of the same script.
+          same=0; maxlines=0
+          for f in "$RF" "$TF"; do
+            [ -f "$f" ] || continue
+            n=$(jq -r '.evidence.script // ""' "$f" | wc -l | tr -d ' ')
+            [ "$n" -gt "$maxlines" ] && maxlines=$n
+          done
+          if [ "$have_r" = 1 ] && [ "$have_t" = 1 ]; then
+            cmp -s <(jq -r '.evidence.script // ""' "$RF") <(jq -r '.evidence.script // ""' "$TF") && same=1
+          fi
+          # emit_script <result.json> <label-suffix> <mode: comment|full>
+          emit_script () {
+            local f="$1" label="$2" mode="$3" lang nlines
+            lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
+            nlines=$(jq -r '.evidence.script // ""' "$f" | wc -l | tr -d ' ')
+            [ "$nlines" -gt 0 ] || return 0
+            echo "**Repro script${label}** (\`${lang}\`)"
+            if [ "$mode" = comment ] && [ "$nlines" -gt 60 ]; then
+              echo "_${nlines} lines — in the \`repro-*\` run [artifact](${RUN_URL})._"
+            else
+              echo "\`\`\`${lang}"; jq -r .evidence.script "$f"; echo '```'
+            fi
+          }
+          # Show one script when the legs match (direct/playwright/most http); both only when
+          # http resolved to genuinely different ids. mode picks comment (trim long) vs full.
+          render_scripts () {
+            local mode="$1"
+            if [ "$have_r" = 1 ] && [ "$have_t" = 1 ] && [ "$same" = 1 ]; then
+              emit_script "$RF" " (run unchanged on both legs)" "$mode"
+            elif [ "$have_r" = 1 ] && [ "$have_t" = 1 ]; then
+              emit_script "$RF" " — reported" "$mode"; echo; emit_script "$TF" " — trunk" "$mode"
+            elif [ "$have_r" = 1 ]; then emit_script "$RF" "" "$mode"
+            elif [ "$have_t" = 1 ]; then emit_script "$TF" "" "$mode"
+            fi
+          }
           {
             echo "## Reproduction — Issue #${ISSUE}: \`${VERDICT}\`"
             echo
@@ -695,6 +737,7 @@ jobs:
               KIND=$(jq -r .kind "$ATTR"); CMT=$(jq -r .likely_commit "$ATTR"); RSN=$(jq -r .reasoning "$ATTR")
               echo "**Likely ${KIND} commit:** \`${CMT}\` — ${RSN}"
             fi
+            # Per-leg verdicts — these legitimately differ between the two versions.
             for t in reported trunk; do
               f="artifacts/repro-${t}/result.json"
               [ -f "$f" ] || continue
@@ -709,34 +752,21 @@ jobs:
                 ex=$(jq -r .assertion.expect "$f"); ac=$(jq -r .assertion.actual "$f")
                 echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
               fi
-              echo
-              # Keep SHORT scripts (http curl / playwright spec) inline for quick reference;
-              # a long one (the direct PHPUnit test, ~200 lines) only bloats the comment, so
-              # point to the artifact instead. The full script is always in the job summary
-              # (below) + the repro-<role> artifact.
-              lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
-              nlines=$(jq -r '.evidence.script // ""' "$f" | wc -l | tr -d ' ')
-              if [ "$nlines" -gt 0 ] && [ "$nlines" -le 60 ]; then
-                echo "\`\`\`${lang}"
-                jq -r .evidence.script "$f"
-                echo '```'
-              elif [ "$nlines" -gt 60 ]; then
-                echo "_Full ${lang} script (${nlines} lines) is in the \`repro-${t}\` artifact of the [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
-              fi
               echo "Reporter: \`$(jq -r .evidence.reporter_output "$f")\`"
             done
+            # The script is shared by both legs (shown once) unless http resolved differently.
+            echo
+            render_scripts comment
           } > comment.md
-          # Job summary = the comment PLUS the full generated scripts (collapsible), so the
-          # whole test stays visible on the run page even when trimmed from the issue comment.
+          # Job summary mirrors the comment; if the comment trimmed a long script to a pointer,
+          # append the full script (collapsed) so it stays visible on the run page too.
           {
             cat comment.md
-            echo; echo "<details><summary>Full generated repro scripts</summary>"; echo
-            for t in reported trunk; do
-              f="artifacts/repro-${t}/result.json"; [ -f "$f" ] || continue
-              lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
-              echo "#### ${t}"; echo "\`\`\`${lang}"; jq -r .evidence.script "$f"; echo '```'; echo
-            done
-            echo "</details>"
+            if [ "$maxlines" -gt 60 ]; then
+              echo; echo "<details><summary>Full generated repro script</summary>"; echo
+              render_scripts full
+              echo; echo "</details>"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Post comment
         # 'blocked' = the repro env/seed failed (infra), not a bug verdict → keep it in the
