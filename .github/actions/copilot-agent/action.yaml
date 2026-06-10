@@ -75,7 +75,7 @@ runs:
         VERSION: ${{ inputs.version }}
         LOG_DIR: ${{ inputs.log-dir || format('{0}/copilot-logs', runner.temp) }}
       run: |
-        set -uo pipefail
+        set -euo pipefail
         npm install -g "@github/copilot@${VERSION}"
         mkdir -p "$LOG_DIR"
         echo "log_dir=$LOG_DIR" >> "$GITHUB_OUTPUT"
