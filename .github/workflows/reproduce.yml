@@ -710,15 +710,34 @@ jobs:
                 echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
               fi
               echo
-              # Fence the embedded script in its own language (php for direct, ts for playwright, sh for http).
+              # Keep SHORT scripts (http curl / playwright spec) inline for quick reference;
+              # a long one (the direct PHPUnit test, ~200 lines) only bloats the comment, so
+              # point to the artifact instead. The full script is always in the job summary
+              # (below) + the repro-<role> artifact.
               lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
-              echo "\`\`\`${lang}"
-              jq -r .evidence.script "$f"
-              echo '```'
+              nlines=$(jq -r '.evidence.script // ""' "$f" | wc -l | tr -d ' ')
+              if [ "$nlines" -gt 0 ] && [ "$nlines" -le 60 ]; then
+                echo "\`\`\`${lang}"
+                jq -r .evidence.script "$f"
+                echo '```'
+              elif [ "$nlines" -gt 60 ]; then
+                echo "_Full ${lang} script (${nlines} lines) is in the \`repro-${t}\` artifact of the [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})._"
+              fi
               echo "Reporter: \`$(jq -r .evidence.reporter_output "$f")\`"
             done
           } > comment.md
-          cat comment.md >> "$GITHUB_STEP_SUMMARY"
+          # Job summary = the comment PLUS the full generated scripts (collapsible), so the
+          # whole test stays visible on the run page even when trimmed from the issue comment.
+          {
+            cat comment.md
+            echo; echo "<details><summary>Full generated repro scripts</summary>"; echo
+            for t in reported trunk; do
+              f="artifacts/repro-${t}/result.json"; [ -f "$f" ] || continue
+              lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
+              echo "#### ${t}"; echo "\`\`\`${lang}"; jq -r .evidence.script "$f"; echo '```'; echo
+            done
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Post comment
         # 'blocked' = the repro env/seed failed (infra), not a bug verdict → keep it in the
         # job summary, don't post public noise on the issue. Real verdicts still post.
