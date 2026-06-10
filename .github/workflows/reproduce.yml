@@ -239,7 +239,14 @@ jobs:
             budget: do the MINIMUM investigation to fill the plan (a few targeted searches,
             NOT a full code tour), then WRITE the output file(s) immediately as your top
             priority. If still uncertain after a handful of tool calls, emit a best-effort
-            plan with a lower `confidence` rather than exploring further. For a playwright
+            plan with a lower `confidence` rather than exploring further. `confidence` is how
+            faithful you believe the plan is (0..1); a plan derived from a linked fix PR's
+            regression test is high (~0.95), one where you had to infer the repro steps with
+            NO fix PR to anchor on is low. Whenever `confidence` < 0.7 you MUST also set
+            `confidence_reason` to one short sentence saying what makes it uncertain (e.g.
+            "no linked fix PR; repro steps inferred from the issue body") — a run below 0.4 is
+            NOT executed (a human is asked to confirm the draft first), so the reason is what
+            they act on. For a playwright
             layer, write the spec straight FROM THE ISSUE'S STEPS using resilient
             role/text locators (getByRole / getByText / getByLabel) — do NOT read
             storefront templates/JS to hunt exact selectors. A simple, imperfect spec is
@@ -329,6 +336,20 @@ jobs:
             echo "::warning::analyze needs info: $NEEDS"
             [ "$POST" = "true" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" \
               --body "## Reproduction — needs info"$'\n\n'"$NEEDS"
+            echo "targets=[]" >> "$GITHUB_OUTPUT"   # no legs → reproduce/report skip
+            exit 0
+          fi
+          # Pre-provision bail-out: a plan the agent itself doesn't trust (< 0.4) is almost
+          # always a guess (no fix PR to derive from). Provisioning two installs to test a
+          # guess wastes the expensive part of the run, so ask a human to confirm the draft
+          # plan FIRST rather than spend it. (0.4–0.7 still runs → needs_human_review.)
+          CONF=$(jq -r '.confidence // 1' analysis.json)
+          if awk "BEGIN{exit !($CONF < 0.4)}"; then
+            REASON=$(jq -r '.confidence_reason // .blocked_reason // "no reason given"' analysis.json)
+            SCEN=$(jq -r '(.scenario // []) | map("- " + .) | join("\n")' analysis.json)
+            echo "::warning::analyze low confidence ($CONF) — bailing before provision: $REASON"
+            [ "$POST" = "true" ] && gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" \
+              --body "## Reproduction — low confidence, not run"$'\n\n'"The analyzer produced a draft plan it is not confident is faithful (confidence \`$CONF\`), so the reproduction was **not** run (to avoid provisioning two installs to test a guess)."$'\n\n'"**Why:** $REASON"$'\n\n'"**Draft scenario it would have tried:**"$'\n'"$SCEN"$'\n\n'"_Confirm or correct the steps above and re-trigger to run it._"
             echo "targets=[]" >> "$GITHUB_OUTPUT"   # no legs → reproduce/report skip
             exit 0
           fi
@@ -511,6 +532,7 @@ jobs:
       reported: ${{ steps.v.outputs.reported }}
       trunk: ${{ steps.v.outputs.trunk }}
       fix_candidate: ${{ steps.v.outputs.fix_candidate }}
+      unsure_reason: ${{ steps.v.outputs.unsure_reason }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -537,10 +559,14 @@ jobs:
           CONF=$(jq -r '.confidence // 1' "$A" 2>/dev/null || echo 1)
           BLOCKED=$(jq -r '.blocked_reason // ""' "$A" 2>/dev/null || echo "")
           DERIVED=$(jq -r '.derived_from // ""' "$A" 2>/dev/null || echo "")
-          # Analyze itself flagged a weak/unformable plan → don't trust any verdict.
-          unsure=false
-          [ -n "$BLOCKED" ] && unsure=true
-          awk "BEGIN{exit !($CONF < 0.55)}" && unsure=true
+          CONF_REASON=$(jq -r '.confidence_reason // ""' "$A" 2>/dev/null || echo "")
+          # Mid-band plan (0.4–0.7; below 0.4 bailed before provision) → don't trust the
+          # verdict even if the legs ran; route to a human with the reason. Capture WHY so
+          # the report says "uncertain: <reason>" not just a number.
+          unsure=false; UNSURE_REASON=""
+          [ -n "$BLOCKED" ] && { unsure=true; UNSURE_REASON="$BLOCKED"; }
+          awk "BEGIN{exit !($CONF < 0.7)}" && { unsure=true; [ -n "$CONF_REASON" ] && UNSURE_REASON="$CONF_REASON"; }
+          echo "unsure_reason=$UNSURE_REASON" >> "$GITHUB_OUTPUT"
 
           # Precedence: infra → unreliable-plan → indeterminate leg → core combos.
           if   [ "$rep" = "blocked" ] || [ "$tru" = "blocked" ];               then V="blocked"
@@ -638,6 +664,7 @@ jobs:
           REP: ${{ needs.verdict.outputs.reported }}
           TRU: ${{ needs.verdict.outputs.trunk }}
           FIX: ${{ needs.verdict.outputs.fix_candidate }}
+          UNSURE: ${{ needs.verdict.outputs.unsure_reason }}
         run: |
           set -euo pipefail
           LAYER=$(jq -r .layer artifacts/analysis/analysis.json 2>/dev/null || echo "unknown")
@@ -659,6 +686,11 @@ jobs:
             if [ "$VERDICT" = "regression" ]; then
               echo "> ⚠️ **Regression**: not reproduced on the reported version but reproduced on trunk. Confirm the reported leg actually exercised the symptom (a missing fixture can cause a false negative)."
             fi
+            if [ "$VERDICT" = "needs_human_review" ]; then
+              # The legs ran but the plan was mid-confidence (0.4–0.7) or a leg was indeterminate.
+              # Show the evidence below; flag WHY a human should adjudicate rather than trust the legs.
+              echo "> 🟡 **Needs human review**: the verdict is not trusted automatically${UNSURE:+ — ${UNSURE}}. The leg evidence below is informative but unconfirmed; confirm against the steps before acting."
+            fi
             if [ -f "$ATTR" ]; then
               KIND=$(jq -r .kind "$ATTR"); CMT=$(jq -r .likely_commit "$ATTR"); RSN=$(jq -r .reasoning "$ATTR")
               echo "**Likely ${KIND} commit:** \`${CMT}\` — ${RSN}"
@@ -678,7 +710,9 @@ jobs:
                 echo "### ${t} — \`${st}\` (expected ${ex}, got ${ac})"
               fi
               echo
-              echo '```sh'
+              # Fence the embedded script in its own language (php for direct, ts for playwright, sh for http).
+              lang=$(jq -r '.evidence.script_lang // "sh"' "$f")
+              echo "\`\`\`${lang}"
               jq -r .evidence.script "$f"
               echo '```'
               echo "Reporter: \`$(jq -r .evidence.reporter_output "$f")\`"

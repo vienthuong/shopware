@@ -21,7 +21,8 @@ check "skip_reported -> one leg"   '["trunk"]'            "$(targets true  6.6.1
 check "reported==trunk -> one leg" '["trunk"]'           "$(targets false trunk    trunk)"
 
 # --- verdict map (first match wins); single-leg runs have reported == null ---
-# unsure = analyze flagged a weak/blocked plan (blocked_reason or confidence < 0.55).
+# unsure = analyze flagged a weak/blocked plan (blocked_reason or 0.4 <= confidence < 0.7;
+# below 0.4 bails before provision, so the verdict job never sees it).
 verdict () { # verdict <reported_status> <trunk_status> [unsure]
   local rep="$1" tru="$2" unsure="${3:-false}"
   if   [ "$rep" = blocked ] || [ "$tru" = blocked ];               then echo blocked
