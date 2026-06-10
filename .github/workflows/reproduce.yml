@@ -350,7 +350,8 @@ jobs:
             analysis.json
             fixtures.json
             repro.spec.ts
-          if-no-files-found: ignore # fixtures.json / repro.spec.ts are optional (seed / playwright only)
+            ReproTest.php
+          if-no-files-found: ignore # fixtures.json / repro.spec.ts / ReproTest.php are optional (seed / playwright / direct only)
           retention-days: 7
 
   # --------------------------------------------------------------------------
