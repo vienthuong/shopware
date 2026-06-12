@@ -1,0 +1,190 @@
+{
+    "repro-manufacturer": {
+        "entity": "product_manufacturer",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "c2d3e4f5061728394a5b6c7d8e9fa0b1",
+                "name": "Repro Manufacturer"
+            }
+        ]
+    },
+    "repro-property-group": {
+        "entity": "property_group",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "a0b1c2d3e4f5061728394a5b6c7d8e9f",
+                "name": "Format",
+                "displayType": "text",
+                "sortingType": "alphanumeric"
+            }
+        ]
+    },
+    "repro-property-group-option": {
+        "entity": "property_group_option",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "b1c2d3e4f506172839a0b1c2d3e4f506",
+                "groupId": "a0b1c2d3e4f5061728394a5b6c7d8e9f",
+                "name": "Repro-Stream"
+            }
+        ]
+    },
+    "repro-parent-product": {
+        "entity": "product",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "d3e4f5061728394a5b6c7d8e9fa0b1c2",
+                "name": "Repro Product",
+                "productNumber": "REPRO-SLIDER-PARENT",
+                "stock": 10,
+                "taxId": "{{TAX}}",
+                "price": [
+                    {
+                        "currencyId": "{{CURRENCY}}",
+                        "net": 10.00,
+                        "gross": 11.90,
+                        "linked": false
+                    }
+                ],
+                "manufacturerId": "c2d3e4f5061728394a5b6c7d8e9fa0b1",
+                "configuratorSettings": [
+                    {
+                        "id": "4a5b6c7d8e9fa0b1c2d3e4f506172839",
+                        "optionId": "b1c2d3e4f506172839a0b1c2d3e4f506"
+                    }
+                ],
+                "visibilities": [
+                    {
+                        "salesChannelId": "{{SC}}",
+                        "visibility": 30
+                    }
+                ]
+            }
+        ]
+    },
+    "repro-variant-product": {
+        "entity": "product",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "e4f5061728394a5b6c7d8e9fa0b1c2d3",
+                "parentId": "d3e4f5061728394a5b6c7d8e9fa0b1c2",
+                "productNumber": "REPRO-SLIDER-STREAM",
+                "stock": 10,
+                "options": [
+                    {
+                        "id": "b1c2d3e4f506172839a0b1c2d3e4f506"
+                    }
+                ]
+            }
+        ]
+    },
+    "repro-cms-page": {
+        "entity": "cms_page",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "f5061728394a5b6c7d8e9fa0b1c2d3e4",
+                "name": "Repro Slider Page",
+                "type": "page",
+                "locked": false,
+                "sections": [
+                    {
+                        "id": "061728394a5b6c7d8e9fa0b1c2d3e4f5",
+                        "position": 0,
+                        "type": "default",
+                        "blocks": [
+                            {
+                                "id": "17283940506172839a0b1c2d3e4f5061",
+                                "position": 0,
+                                "type": "product-slider",
+                                "sectionPosition": "main",
+                                "slots": [
+                                    {
+                                        "id": "283940506172839a0b1c2d3e4f506172",
+                                        "type": "product-slider",
+                                        "slot": "productSlider",
+                                        "config": {
+                                            "products": {
+                                                "source": "static",
+                                                "value": [
+                                                    "e4f5061728394a5b6c7d8e9fa0b1c2d3"
+                                                ]
+                                            },
+                                            "title": {
+                                                "source": "static",
+                                                "value": "Repro Slider"
+                                            },
+                                            "limit": {
+                                                "source": "static",
+                                                "value": 10
+                                            },
+                                            "rotate": {
+                                                "source": "static",
+                                                "value": false
+                                            },
+                                            "boxLayout": {
+                                                "source": "static",
+                                                "value": "standard"
+                                            },
+                                            "displayMode": {
+                                                "source": "static",
+                                                "value": "standard"
+                                            },
+                                            "navigationArrows": {
+                                                "source": "static",
+                                                "value": "outside"
+                                            },
+                                            "navigationDots": {
+                                                "source": "static",
+                                                "value": null
+                                            },
+                                            "elMinWidth": {
+                                                "source": "static",
+                                                "value": "300px"
+                                            },
+                                            "verticalAlign": {
+                                                "source": "static",
+                                                "value": null
+                                            },
+                                            "border": {
+                                                "source": "static",
+                                                "value": false
+                                            },
+                                            "speed": {
+                                                "source": "static",
+                                                "value": 300
+                                            },
+                                            "autoplayTimeout": {
+                                                "source": "static",
+                                                "value": 5000
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "repro-category": {
+        "entity": "category",
+        "action": "upsert",
+        "payload": [
+            {
+                "id": "3940506172839a0b1c2d3e4f50617283",
+                "name": "Repro Category",
+                "parentId": "{{NAV_CAT}}",
+                "active": true,
+                "cmsPageId": "f5061728394a5b6c7d8e9fa0b1c2d3e4",
+                "displayNestedProducts": true
+            }
+        ]
+    }
+}

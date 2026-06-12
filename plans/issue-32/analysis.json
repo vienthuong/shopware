@@ -1,0 +1,32 @@
+{
+    "schema_version": "1",
+    "issue": 32,
+    "layer": "storefront-ui",
+    "executor": "playwright",
+    "version": "6.7.8.2",
+    "build_profile": {
+        "admin_build": false,
+        "storefront_build": true,
+        "theme_build": true
+    },
+    "fixtures": {
+        "demodata": false,
+        "sync_payload_path": "fixtures.json"
+    },
+    "scenario": [
+        "Given a product variant (property group 'Format', option 'Repro-Stream') is manually assigned to a CMS product-slider block on a category page",
+        "When a visitor navigates to that category page in the storefront",
+        "Then the product card in the slider must display the variant option text 'Repro-Stream' below the product name (rendered by box-standard.html.twig from product.variation)"
+    ],
+    "script_path": "repro.spec.ts",
+    "assertion": {
+        "kind": "ui_state",
+        "expect": "visible",
+        "locator": "getByText(/Repro-Stream/i) scoped to the product-gallery region on /Repro-Category/"
+    },
+    "derived_from": "issue #32 screenshots (img-1: blank variant-characteristics area; img-2: 'Live-Film: Stream' correctly shown); src/Storefront/Resources/views/storefront/component/product/card/box-standard.html.twig:142 product.variation loop",
+    "confidence": 0.72,
+    "confidence_reason": "CMS slot fixture depends on nested sync-API write (cms_page → sections → blocks → slots) which may not seed correctly in CI, making the slider absent and the leg inconclusive rather than reproducing the bug.",
+    "blocked_reason": null,
+    "needs_info": null
+}
